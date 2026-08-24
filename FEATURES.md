@@ -5,6 +5,26 @@ automation, research, multi-agent orchestration and Gemini Live voice.
 
 ---
 
+## 0. 🎨 Setup TUI & Configuration (Phase 33)
+
+A premium full-screen terminal configuration experience (`src/setup/`, `src/tui/`):
+
+| Area | Details |
+|---|---|
+| First-run detection | Bare `rose` opens the wizard once; versioned setup state, legacy-config migration |
+| Full-screen TUI | Alternate buffer, diff renderer, resize handling, min-size fallback screen |
+| Keyboard | Arrows / Tab / Shift+Tab / Enter / Esc / Space / Ctrl+C·K·R·L; mouse clicks & scroll where supported |
+| Sections | Welcome · AI Provider (+ real Test Connection) · Workspace (+ project detection) · Memory · Security · Appearance (live theme/accent/density preview) · Web Control (port checks) · Review (masked diff) · Health Check · Complete |
+| Config safety | Draft → validate → backup → atomic write → verify → rollback on failure; `--reset` keeps memory/projects and backs up first |
+| Secrets | Masked everywhere; never logged, never echoed in inputs or diffs |
+| Accessibility | `--plain` linear flow, NO_COLOR/ASCII degradation, high-contrast option, keyboard-only operation |
+| Shared engine | `rose doctor` + TUI health screen use one diagnostic suite (`src/setup/health.ts`) |
+
+Commands: `rose`, `rose setup [--reset|--plain|--no-color|--debug]`, `rose config`,
+`rose doctor`, `rose status`, `rose web`. Tests: `npm run test:phase33`.
+
+---
+
 ## 1. 🧠 Model Routing (Multi-Provider)
 
 Rose is not locked to a single provider. The Model Router (`src/router.ts`) picks the
@@ -15,10 +35,20 @@ right model per task:
 | Google Gemini | Direct API + Live WebSocket | Text + real-time voice |
 | Anthropic Claude | Direct API | Claude 3.5 Sonnet / Opus / Haiku |
 | OpenAI GPT | Direct API | GPT-4o / GPT-4o Mini / GPT-4 Turbo |
+| OpenRouter | Direct API (external) | 400+ models via one key — discovery-driven, capability-aware (Phase 35) |
 | Antigravity Proxy | Local proxy | Claude & GPT through one endpoint |
 
-Routing hints (`fast`, `smart`, etc.) let subsystems request the class of model they
+Routing hints (`fast`, `smart`, `vision`, etc.) let subsystems request the class of model they
 need instead of a hard-coded name.
+
+### OpenRouter specifics (`src/providers/openrouter.ts`, Phase 35)
+- **Naming**: rose-style ids `openrouter/<vendor>/<model>`; prefix stripped automatically on the wire.
+- **Discovery**: live `/models` catalog → context length, tool support, vision modality, pricing badges in setup; failed discovery still works with explicitly configured models.
+- **Streaming**: SSE streaming implemented inside the provider contract — same normalized output shape.
+- **Tool calling**: native `tool_calls` are converted into Rose's existing ```tool fenced protocol, so Security/Policy/ToolExecutor paths apply unchanged.
+- **Usage/cost**: prompt/completion/cached tokens + API-computed cost recorded into Telemetry and CostEngine — never invented.
+- **Errors**: mapped to Rose categories (auth failure, invalid model, rate limit w/ Retry-After gate, quota, timeout, malformed response).
+- **Privacy**: marked as an external/remote provider; keys masked everywhere (logs, doctor, diffs).
 
 ---
 

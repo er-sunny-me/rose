@@ -1,7 +1,9 @@
-import * as fs from 'fs';
+﻿import * as fs from 'fs';
 import * as path from 'path';
 import crypto from 'crypto';
+import { MemoryIndexer, type IndexStatus } from './memory/indexer.js';
 import type { ResearchTask } from './research.js';
+import { Config } from './config.js';
 
 export interface MemoryEntry {
   id: string;
@@ -182,8 +184,47 @@ export class MemoryService {
     const filePath = this.getFilePath(type, id);
     fs.writeFileSync(filePath, this.generateMarkdown(newEntry), 'utf8');
     this.index.set(id, newEntry);
+    void this.indexEntry(newEntry);
+    this.mirrorToObsidian(filePath, newEntry);
+    this.enforceRetention(type);
     console.log(`[MEMORY] Saved entry ${id} (${newEntry.name})`);
     return newEntry;
+  }
+
+  /**
+   * Phase 33: when an Obsidian vault is configured, saved entries are mirrored
+   * into `<vault>/Rose Memory/` so they appear in the user's vault.
+   */
+  private static mirrorToObsidian(sourcePath: string, entry: MemoryEntry): void {
+    try {
+      const vault = Config.get().memory?.obsidianVaultPath;
+      if (!vault) return;
+      if (!fs.existsSync(vault)) return; // honest no-op: never fabricate folders silently
+      const targetDir = path.join(vault, 'Rose Memory');
+      if (!fs.existsSync(targetDir)) fs.mkdirSync(targetDir, { recursive: true });
+      fs.copyFileSync(sourcePath, path.join(targetDir, `${entry.id}.md`));
+    } catch (err) {
+      // Mirroring must never break saving.
+      console.error('[MEMORY] Obsidian mirror failed:', err);
+    }
+  }
+
+  /** Phase 33: retention â€” keep at most maxEntriesPerType entries per type. */
+  private static enforceRetention(type: string): void {
+    try {
+      const max = Config.get().memory?.maxEntriesPerType;
+      if (!max || max < 10) return;
+      const ofSameType = Array.from(this.index.values())
+        .filter(e => e.type === type)
+        .sort((a, b) => b.updated.localeCompare(a.updated));
+      for (const stale of ofSameType.slice(max)) {
+        const p = this.getFilePath(stale.type, stale.id);
+        if (fs.existsSync(p)) fs.unlinkSync(p);
+        this.index.delete(stale.id);
+      }
+    } catch (err) {
+      console.error('[MEMORY] Retention enforcement failed:', err);
+    }
   }
 
   public static async update(id: string, patch: Partial<MemoryEntry>): Promise<MemoryEntry> {
@@ -205,6 +246,7 @@ export class MemoryService {
     const filePath = this.getFilePath(updatedEntry.type, id);
     fs.writeFileSync(filePath, this.generateMarkdown(updatedEntry), 'utf8');
     this.index.set(id, updatedEntry);
+    void this.indexEntry(updatedEntry);
     console.log(`[MEMORY] Updated entry ${id}`);
     return updatedEntry;
   }
@@ -218,6 +260,7 @@ export class MemoryService {
       fs.unlinkSync(filePath);
     }
     this.index.delete(id);
+    try { this.getIndexer().removeMemory(id); } catch { /* non-fatal */ }
     console.log(`[MEMORY] Deleted entry ${id}`);
   }
 
@@ -288,6 +331,60 @@ export class MemoryService {
     return block;
   }
 
+  // â”€â”€â”€ Phase 34: semantic (vector) layer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+  private static vectorIndexer: MemoryIndexer | null = null;
+
+  /** Lazily build the indexer over this vault (local-first embedding). */
+  public static getIndexer(): MemoryIndexer {
+    if (!this.vectorIndexer) {
+      this.vectorIndexer = new MemoryIndexer(this.VAULT_DIR);
+    }
+    return this.vectorIndexer;
+  }
+
+  /**
+   * Hybrid retrieval: keyword matching fused with vector similarity.
+   * Falls back to pure keyword results when the embedding provider is
+   * unavailable, so the agent never loses memory access.
+   */
+  public static async searchHybrid(options: MemorySearchOptions & { threshold?: number }): Promise<MemoryEntry[]> {
+    const keyword = await this.search({ ...options, limit: options.limit || 10 });
+    try {
+      const hybrid = await this.getIndexer().searchHybrid(options.query || '', {
+        keywordResults: keyword,
+        limit: options.limit || 5,
+        threshold: options.threshold,
+        project: options.project,
+        type: options.type,
+      });
+      // Semantic-only hits arrive as IndexableEntry; promote to full entries.
+      return hybrid.map((e) => ({
+        created: '',
+        updated: '',
+        ...e,
+      }) as MemoryEntry);
+    } catch {
+      return keyword;
+    }
+  }
+
+  /** Index one entry after it is written. */
+  public static async indexEntry(entry: MemoryEntry): Promise<void> {
+    try { await this.getIndexer().indexMemory(entry); } catch { /* non-fatal */ }
+  }
+
+  /** Rebuild the whole semantic index from disk. */
+  public static async reindex(): Promise<IndexStatus> {
+    this.vectorIndexer = null;
+    return this.getIndexer().reindexAll();
+  }
+
+  /** Current index statistics. */
+  public static indexStatus(): IndexStatus {
+    return this.getIndexer().status();
+  }
+
   public static async saveResearchTask(task: ResearchTask): Promise<void> {
     const yaml = `---
 type: research
@@ -302,3 +399,6 @@ status: ${task.status}
     this.reloadIndex();
   }
 }
+
+
+

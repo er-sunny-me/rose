@@ -1,3 +1,6 @@
+import fs from 'fs';
+import { Config } from './config.js';
+
 export type ServiceStatus = "available" | "disconnected" | "error";
 
 export interface ExternalService {
@@ -6,27 +9,44 @@ export interface ExternalService {
     status: ServiceStatus;
 }
 
+/**
+ * Phase 34: real configuration-aware service detection.
+ * GitHub  → GITHUB_TOKEN env or keys.github
+ * Google  → GOOGLE_CREDENTIALS token file (shared by Gmail + Calendar)
+ */
 export class ExternalServiceManager {
+
+    private static hasGoogleCredentials(): boolean {
+        if (process.env.GOOGLE_CREDENTIALS) {
+            try { return fs.existsSync(process.env.GOOGLE_CREDENTIALS); } catch { return false; }
+        }
+        return false;
+    }
+
     public static getServices(): ExternalService[] {
-        // Since we are not using heavy SDKs yet, we check the environment for tokens.
-        // GitHub: Check GITHUB_TOKEN
-        // Google Calendar: Check GOOGLE_CALENDAR_TOKEN
-        // Gmail: Check GMAIL_TOKEN
+        const cfg = Config.get();
+        const githubReady = !!(process.env.GITHUB_TOKEN || cfg.keys?.github);
+        // Legacy single-token vars still count as partial readiness signals,
+        // but the full integration requires the OAuth tokens file.
+        const googleReady = this.hasGoogleCredentials()
+            || !!process.env.GOOGLE_CALENDAR_TOKEN
+            || !!process.env.GMAIL_TOKEN;
+
         return [
             {
                 id: 'github',
                 name: 'GitHub',
-                status: process.env.GITHUB_TOKEN ? 'available' : 'disconnected'
+                status: githubReady ? 'available' : 'disconnected',
             },
             {
                 id: 'calendar',
                 name: 'Google Calendar',
-                status: process.env.GOOGLE_CALENDAR_TOKEN ? 'available' : 'disconnected'
+                status: googleReady ? 'available' : 'disconnected',
             },
             {
                 id: 'email',
                 name: 'Gmail',
-                status: process.env.GMAIL_TOKEN ? 'available' : 'disconnected'
+                status: googleReady ? 'available' : 'disconnected',
             }
         ];
     }

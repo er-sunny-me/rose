@@ -22,11 +22,20 @@ ANTHROPIC_API_KEY=your_claude_key     # optional
 OPENAI_API_KEY=your_openai_key        # optional
 ```
 
-Or run the interactive setup wizard:
+Or launch the full-screen setup experience (recommended):
 
 ```bash
-npm run dev -- setup
+rose            # first run opens the Rose Setup TUI automatically
+rose setup      # reopen it anytime
 ```
+
+The setup TUI configures provider, model, API key (masked, never displayed),
+workspace, memory, security policy, theme and the Web Control Panel — then
+runs a real health check before declaring READY. Keys can alternatively come
+from `.env` / environment variables; both are detected automatically.
+
+> Non-interactive shells (CI): Rose skips the wizard and prints `rose config`
+> instructions instead. Use `rose setup --plain` for a linear fallback flow.
 
 ## Step 2: Install & Run
 

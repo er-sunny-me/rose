@@ -63,6 +63,10 @@ export interface FailurePattern {
 export class LearningStore {
     private static BASE_DIR = path.join(process.cwd(), 'learning');
     private static DIRS = ['preferences', 'strategies', 'failures', 'feedback'];
+    /** Phase 33: master switch wired to config.memory.learningEnabled.
+     * Explicit user preferences are still recorded when disabled. */
+    public static enabled = true;
+    public static gate(): boolean { return LearningStore.enabled; }
 
     public static init() {
         if (!fs.existsSync(this.BASE_DIR)) {
@@ -221,6 +225,7 @@ export class PreferenceManager {
     }
 
     public static recordInferredPreference(key: string, value: any, scope: 'global' | 'project' = 'global', projectName?: string) {
+        if (!LearningStore.gate()) return;
         const existing = LearningStore.getPreferences().find(p => p.key === key && p.scope === scope && p.projectName === projectName);
         
         if (existing) {
@@ -270,6 +275,7 @@ export class PreferenceManager {
 
 export class StrategyLearner {
     public static recordTaskOutcome(domain: string, situation: string, steps: string[], success: boolean, taskId: string) {
+        if (!LearningStore.gate()) return;
         const strats = LearningStore.getStrategies();
         // Simple matching logic based on domain and situation similarity
         let strat = strats.find(s => s.domain === domain && s.situation === situation);
@@ -328,6 +334,7 @@ export class StrategyLearner {
     }
 
     public static recordFailurePattern(description: string, preventionHint: string) {
+        if (!LearningStore.gate()) return;
         const patterns = LearningStore.getFailurePatterns();
         let p = patterns.find(pat => pat.description === description);
         if (p) {

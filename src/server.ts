@@ -1,7 +1,11 @@
 import express from 'express';
 import cors from 'cors';
+import http from 'http';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { WebSocketServer, WebSocket } from 'ws';
+import type { IncomingMessage } from 'http';
+import type { Duplex } from 'stream';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -28,16 +32,31 @@ import { MaintenanceVerifier } from './maintenance/verifier.js';
 import { federationRouter } from './federation/api.js';
 import { MetricsSystem, HealthMonitor, SLOSystem, CapacityEngine, CostEngine, PerformanceEngine, BottleneckAnalyzer, OptimizationEngine } from './observability/index.js';
 import { PolicyStore } from './policy/store.js';
+import { Config } from './config.js';
+import { AuthService, authenticateRequest, authorizeRequest } from './server/auth.js';
 import chalk from 'chalk';
 
 export class AgentServer {
     private app = express();
-    private port = process.env.PORT ? parseInt(process.env.PORT) : 3000;
-    private host = process.env.HOST || '127.0.0.1';
+    private server: http.Server | null = null;
+    private wss: WebSocketServer | null = null;
+    // Phase 33: honor setup-configured web settings; env vars still win for
+    // one-off overrides. Defaults bind to localhost only.
+    private port: number;
+    private host: string;
 
     constructor() {
+        const cfg = Config.get();
+        this.port = process.env.PORT
+            ? parseInt(process.env.PORT)
+            : (cfg.web?.port ?? cfg.server.port ?? 3000);
+        this.host = process.env.HOST || cfg.web?.host || '127.0.0.1';
         this.app.use(cors());
         this.app.use(express.json());
+        // Phase 34: every API route requires a valid bearer token.
+        // /health and /ready remain public for liveness probes.
+        this.app.use(authenticateRequest);
+        this.app.use(authorizeRequest);
         this.setupRoutes();
     }
 
@@ -396,8 +415,56 @@ export class AgentServer {
 
     public start() {
         LearningStore.init();
-        this.app.listen(this.port, this.host, () => {
+        this.server = this.app.listen(this.port, this.host, () => {
             console.log(chalk.green(`🚀 Agent Server running at http://${this.host}:${this.port}`));
+
+            if (this.host !== '127.0.0.1' && this.host !== 'localhost') {
+                console.log(chalk.bold.red(''));
+                console.log(chalk.bold.red('⚠️  WARNING: Rose will be accessible from other devices on your network.'));
+                console.log(chalk.bold.red('⚠️  Authentication is required. Clients must send the API token:'));
+                console.log(chalk.bold.red(`    Authorization: Bearer <token from .rose/auth-token>`));
+                console.log(chalk.bold.red(''));
+            } else {
+                const tokenFile = path.join(process.cwd(), '.rose', 'auth-token');
+                console.log(chalk.gray(`   API auth: enabled (bearer token in ${tokenFile} or ROSE_API_TOKEN)`));
+            }
+        });
+
+        // Phase 34: authenticated WebSocket endpoint at /ws.
+        // The upgrade request must carry ?token= or an Authorization header;
+        // client-supplied session/user/agent ids are never trusted.
+        this.wss = new WebSocketServer({ noServer: true });
+        this.server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => {
+            if (!req.url || !req.url.startsWith('/ws')) {
+                socket.destroy();
+                return;
+            }
+
+            const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+            const presented = AuthService.extractBearer(req.headers.authorization) ?? url.searchParams.get('token');
+            if (!AuthService.verifyToken(presented)) {
+                socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+                socket.destroy();
+                return;
+            }
+
+            this.wss!.handleUpgrade(req, socket, head, (ws) => {
+                this.wss!.emit('connection', ws, req);
+            });
+        });
+
+        this.wss.on('connection', (ws: WebSocket) => {
+            ws.send(JSON.stringify({ type: 'hello', authenticated: true }));
+            ws.on('message', (data) => {
+                // Echo-style control channel; command execution intentionally
+                // does NOT flow through raw websocket messages.
+                try {
+                    const msg = JSON.parse(data.toString());
+                    if (msg.type === 'ping') ws.send(JSON.stringify({ type: 'pong' }));
+                } catch {
+                    /* ignore malformed frames */
+                }
+            });
         });
     }
 }

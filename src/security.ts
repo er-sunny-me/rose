@@ -161,3 +161,7 @@ export class SecurityEngine {
         return redacted;
     }
 }
+
+// Publish the workspace boundary to the command sandbox (Phase 34).
+import { setWorkspaceBoundary } from './security/sandbox.js';
+setWorkspaceBoundary(SecurityEngine.workspaceRoot);

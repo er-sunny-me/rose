@@ -24,7 +24,23 @@ export function getSystemInstruction(): string {
 export class ContextManager {
     private maxTokens = parseInt(process.env.MAX_CONTEXT_TOKENS || '32000', 10);
     private historySummary = "";
-    
+
+    /**
+     * Phase 35: effective budget clamps the configured limit to the selected
+     * model's real context window when the provider exposes one (e.g.
+     * OpenRouter discovery). Token logic stays here — single source of truth.
+     */
+    private effectiveBudget(): number {
+        try {
+            const modelLimit = ModelRouter.getContextLimit();
+            if (typeof modelLimit === 'number' && modelLimit > 0) {
+                // Leave headroom for the response itself.
+                return Math.min(this.maxTokens, Math.max(2048, modelLimit - (parseInt(process.env.MAX_OUTPUT_TOKENS || '4096', 10))));
+            }
+        } catch { /* router not initialized yet */ }
+        return this.maxTokens;
+    }
+
     // Very lightweight estimation fallback
     public estimateTokens(text: string): number {
         return Math.ceil(text.length / 4);
@@ -86,16 +102,17 @@ Respond with a concise markdown summary.`;
 
         let total = tokensSys + tokensTask + tokensInput + tokensMemory + tokensSkills + tokensSummary + tokensHistory;
 
+        const budget = this.effectiveBudget();
         let compacted = false;
-        if (total > this.maxTokens * 0.85) {
-            console.log(chalk.yellow(`[CONTEXT] Usage exceeds 85% (${total} / ${this.maxTokens}). Initiating emergency compaction...`));
-            
+        if (total > budget * 0.85) {
+            console.log(chalk.yellow(`[CONTEXT] Usage exceeds 85% (${total} / ${budget}). Initiating emergency compaction...`));
+
             // Compact the oldest messages, keep the 5 most recent
             const oldHistory = prunedHistory.slice(0, Math.max(0, prunedHistory.length - 5));
             if (oldHistory.length > 0) {
                 const newSummary = await this.compactConversation(oldHistory);
                 this.historySummary = this.historySummary ? `${this.historySummary}\n\nUpdate:\n${newSummary}` : newSummary;
-                
+
                 // Prune
                 prunedHistory = prunedHistory.slice(Math.max(0, prunedHistory.length - 5));
                 historyText = prunedHistory.map(m => m.parts[0]?.text || '').join('\n');
@@ -103,9 +120,9 @@ Respond with a concise markdown summary.`;
                 tokensSummary = this.estimateTokens(this.historySummary);
                 compacted = true;
             }
-            
+
             total = tokensSys + tokensTask + tokensInput + tokensMemory + tokensSkills + tokensSummary + tokensHistory;
-            if (total > this.maxTokens) {
+            if (total > budget) {
                 console.log(chalk.red(`[CONTEXT] Still exceeding bounds! Pruning Memory and Skills...`));
                 input.memory = "";
                 input.activeSkills = "";
@@ -125,9 +142,9 @@ Respond with a concise markdown summary.`;
             finalPrompt: assembledPrompt,
             prunedHistory,
             stats: {
-                budget: this.maxTokens,
+                budget,
                 usage: total,
-                percent: Math.round((total / this.maxTokens) * 100),
+                percent: Math.round((total / budget) * 100),
                 compacted
             }
         };

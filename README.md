@@ -16,10 +16,34 @@ This platform brings together 30 phases of advanced architectural development in
 
 ## Getting Started
 
-### 1. Configuration
-Create a `.env` file in the root directory:
+### 1. First-Run Setup (Phase 33)
+After installing, launch Rose. The first time you run it, a full-screen
+interactive setup experience opens — provider selection, workspace, memory,
+security policy, appearance (live theme preview) and the Web Control Panel:
+
 ```bash
-GEMINI_API_KEY=your_api_key_here
+rose            # first run -> opens Rose Setup TUI
+rose setup      # reopen the configuration experience anytime
+rose config     # settings dashboard for existing installs
+```
+
+Useful setup flags:
+```bash
+rose setup --reset      # restore defaults (memory/projects are kept; backup made first)
+rose setup --plain      # linear fallback without the full-screen UI
+rose setup --no-color   # disable colors
+rose setup --debug      # verbose errors (secrets stay masked)
+```
+
+Configuration lives at `~/.rose/config.json` and is written atomically with an
+automatic backup before every change. API keys can also come from environment
+variables (`GEMINI_API_KEY` / `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`) and are
+never displayed in full by any UI.
+
+Verify your installation:
+```bash
+rose doctor     # same health checks as the setup Health Check screen
+rose status
 ```
 
 ### 2. Startup Modes

@@ -1,0 +1,58 @@
+name: Package Smoke Test
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  pack:
+    name: npm pack + install smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci || npm install
+
+      - name: Build
+        run: npm run build
+
+      - name: Pack tarball
+        run: npm pack
+
+      - name: Scan tarball for secrets
+        shell: bash
+        run: |
+          TARBALL=$(ls rose-ai-*.tgz)
+          tar -xzf "$TARBALL" -C /tmp 2>/dev/null || tar -xzf "$TARBALL" -C "${TMPDIR:-/tmp}"
+          # NOTE: 'ghp_abcdefghijklmnopqrstuvwxyz012345' is a well-known DUMMY
+          # fixture used by the security self-test in src/setup/health.ts.
+          if grep -rE "(sk-[a-zA-Z0-9]{20}|ghp_[a-zA-Z0-9]{30}|AIza[a-zA-Z0-9_-]{30})" package/ \
+            | grep -v "ghp_abcdefghijklmnopqrstuvwxyz012345" ; then
+            echo "SECRETS FOUND IN PACKAGE"
+            exit 1
+          fi
+          echo "Secret scan clean (fixtures excluded)."
+
+      - name: Install tarball in clean directory
+        shell: bash
+        run: |
+          TARBALL=$(ls rose-ai-*.tgz | head -1)
+          mkdir -p smoke && cd smoke
+          npm init -y >/dev/null
+          npm install "../$TARBALL"
+
+      # NOTE: publishing is intentionally NOT automated here.
+      # Releases are published manually via `npm publish` after review.

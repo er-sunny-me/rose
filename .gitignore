@@ -20,3 +20,8 @@ temp_index_snapshot.txt
 test_autonomous.txt
 test_frame.jpg
 voice-fix.txt
+
+.rose/
+conversations/
+smoke-test/
+test-phase*.ts

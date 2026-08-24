@@ -1,4 +1,51 @@
-# 🎉 Latest Updates - Voice-to-Voice Improvements
+# 🎉 Latest Updates
+
+## Phase 35 — OpenRouter Provider (Aug 2026)
+
+OpenRouter is now a first-class provider inside the existing Model Router — no
+new architecture, same circuit-breaker, fallback chain, Security gating and
+observability as every other provider.
+
+- `rose setup` → **OpenRouter** section: masked key input, live model discovery
+  with context/tools/vision badges, real Test Connection.
+- `rose config set agent.provider openrouter` + `keys.openrouter` / env
+  `OPENROUTER_API_KEY` (endpoint overridable via `openrouter.baseUrl`).
+- Model naming: `openrouter/<vendor>/<model>`.
+- Streaming, native tool-call conversion into the existing parser protocol,
+  usage + cost accounting, normalized error categories with Retry-After.
+- `rose doctor` probes configuration, connectivity, authentication and the
+  selected model — keys always masked.
+- Tests: `npm run test:phase35` (mocked HTTP, 40 checks) plus an optional live
+  integration test (`test-phase35-integration.ts`, runs only with a real key).
+
+## Phase 33 — Premium Setup TUI & Configuration Experience (Aug 2026)
+
+The first-run and configuration experience has been completely rebuilt as a
+professional full-screen terminal application.
+
+**Highlights**
+- `rose` on a fresh install now launches the **Rose Setup TUI** (alternate-screen,
+  keyboard-first, mouse-aware, resize-safe, Ctrl+C always restores your terminal).
+- Guided sections: Welcome · AI Provider · Workspace · Memory · Security ·
+  Appearance · Web Control · Review · Health Check · Complete.
+- **Test Connection** performs real provider probes — results are never faked.
+- Appearance with **live preview**: themes (Rose Dark/Light/System), accents,
+  density, animations, unicode mode, high contrast.
+- Security screen maps directly onto the backend autonomy modes; the Policy
+  Engine remains authoritative.
+- Web Control Panel config binds to `127.0.0.1` by default with honest port
+  availability checks and free-port suggestions.
+- Review shows a masked diff before saving; writes are atomic with automatic
+  backup + rollback (`Configuration was not changed.` on failure).
+- Versioned setup state (`setup.version`) enables future partial migrations.
+- `rose setup --reset | --plain | --no-color | --debug`, plus non-TTY guidance.
+- `rose doctor` and the TUI health screen share one diagnostic engine.
+- Tests: `npm run test:phase33` (40 checks covering validation, transactional
+  apply, migration detection, secret masking, port conflicts, render golden tests).
+
+---
+
+# Earlier: Voice-to-Voice Improvements
 
 ## ✨ What's New
 
@@ -253,3 +300,35 @@ You: Hello! Tell me about yourself
 
 Last Updated: August 23, 2026
 Version: 2.0 (Auto-Connect + Voice Input Ready)
+
+---
+
+# 🚀 Phase 34 — Real Capability Upgrade + Architecture Hardening
+
+## Architecture
+- **index.ts refactor**: 2455 → ~840 lines. Slash commands moved to 9 modules under `src/cli/commands/` (registry-driven, DI context), voice subsystem extracted to `src/voice/live-session.ts` with an audio state machine.
+- **Fixed dead code**: duplicate `/agents` case, unreachable multi-word cases (now a working `/agent inspect|trust|revoke` router), broken `/security mode` parsing; `/simulate` now reaches the pipeline as designed.
+
+## Security
+- **Server auth**: every API route requires a bearer token (`.rose/auth-token` or `ROSE_API_TOKEN`, timing-safe compare). `/health` + `/ready` stay public. WebSocket upgrade at `/ws` requires the same token. LAN bindings print a strong warning.
+- **Command sandbox** (`src/security/sandbox.ts`): denylist → quote-aware parser → executable allowlist → arg validation → **working-directory jail with symlink/junction resolution** → filtered env (secrets stripped) → timeout + output caps + process-tree kill. `execute_command` supports `dry_run` decision reports. Raw shell `exec` removed from tools.
+- **UI login gate**: dashboard asks for the API token once (localStorage).
+
+## Intelligence
+- **Vector memory**: Gemini text-embedding-004 provider + local hashed-BOW fallback, JSON vector index with content-hash embedding cache, markdown-aware chunker, **hybrid keyword+vector fusion**, project-scoped isolation, corrupt-index recovery, `/memory index|reindex|status`.
+- **Obsidian RAG** (`src/memory/obsidian.ts`): configured-vault ingestion (frontmatter/tags/[[links]] parsed), semantic search over notes, transparent source citations, new `search_obsidian` tool.
+
+## Integrations
+- **GitHub**: real REST via Octokit — issues, comments, labels, close, PR list/diff/files, workflow runs. Writes remain policy-gated external actions.
+- **Google**: OAuth client shared by Gmail (search/read/draft/send-with-confirmation) and Calendar (list/search/create/delete). Side effects gated by Policy Engine.
+
+## Autonomy & Voice
+- **Playwright browser control**: domain allow/deny enforced per-request via routing, downloads off by default, screenshots persisted as artifacts, page content wrapped as UNTRUSTED WEB CONTENT. Optional dependency — degrades cleanly when absent.
+- **Full-duplex voice**: deterministic audio state machine (IDLE/LISTENING/THINKING/SPEAKING/INTERRUPTING/PROCESSING_USER/ERROR), server-driven barge-in kills playback instantly and preserves partial transcripts, continuous listening after setup, `/voice stop` teardown, MIC ACTIVE privacy indicator.
+
+## Local models & offline
+- **OllamaProvider** plugs into the Model Router registry (health circuit-breaker, model discovery, OpenAI-shaped replies). Offline mode keeps only local providers.
+
+## Quality
+- **128 unit tests** (Vitest) across policy engine, capability router, memory, transactions, security redaction/injection, command sandbox (36 cases incl. traversal/symlink/junction), server auth, vector memory, Obsidian RAG, GitHub (mocked API), browser (live local pages), Ollama (offline/mocked).
+- **CI** (GitHub Actions): test matrix (Ubuntu/Windows/macOS × Node 20/22), build verification, npm pack + secret scan + clean-dir install smoke test. No auto-publishing.

@@ -1,4 +1,5 @@
 import { Telemetry } from './telemetry.js';
+import chalk from 'chalk';
 import { PreferenceManager } from './learning.js';
 import { FailureInjector } from './reliability/injector.js';
 import { Config } from './config.js';
@@ -308,6 +309,34 @@ export class ModelRouter {
             this.providers.push(new OpenAIProvider('gpt-4o', 'GPT-4o', 'Smart', undefined, 'gpt-4o'));
             this.providers.push(new OpenAIProvider('gpt-4o-mini', 'GPT-4o Mini', 'Fast', undefined, 'gpt-4o-mini'));
             this.providers.push(new OpenAIProvider('gpt-4-turbo', 'GPT-4 Turbo', 'Powerful', undefined, 'gpt-4-turbo'));
+        } else if (primary === 'openrouter') {
+            // Phase 35: discovery-driven registration. No fake model list —
+            // models come from OpenRouter's /models endpoint; when discovery
+            // fails we still register the explicitly configured model.
+            const { OpenRouterProvider } = await import('./providers/openrouter.js');
+            const configured = cfg.agent?.model?.startsWith('openrouter/')
+                ? cfg.agent.model
+                : (cfg.agent?.model ? `openrouter/${cfg.agent.model}` : 'openrouter/anthropic/claude-3.5-sonnet');
+
+            try {
+                const models = await OpenRouterProvider.listModels();
+                const usable = models.filter(m => m.supportsTools !== false);
+                // Prefer capable, larger-context models; cap the registry size.
+                const picked = usable.sort((a, b) => (b.contextLength ?? 0) - (a.contextLength ?? 0)).slice(0, 6);
+                for (const m of picked) {
+                    const tier = (m.supportsVision ? 'Vision' : (m.supportsTools ? 'Smart' : 'Fast'));
+                    this.providers.push(new OpenRouterProvider(m.id, tier, m.name));
+                }
+                console.log(chalk.gray(`[ROUTER] OpenRouter: ${models.length} models discovered (${picked.length} registered).`));
+            } catch {
+                console.warn('[ROUTER] Could not discover OpenRouter models.');
+            }
+            ModelRouter.openrouterModule = { OpenRouterProvider };
+
+            if (!this.providers.some(p => p.id === configured)) {
+                // Discovery failed or model missing from top-N: explicit config still works.
+                this.providers.unshift(new OpenRouterProvider(configured, 'External'));
+            }
         } else {
             // Proxy (default) - fetch models LIVE from proxy
             const proxyUrl = cfg.proxy?.url || 'http://localhost:8642';
@@ -340,11 +369,66 @@ export class ModelRouter {
         if (primary !== 'gemini' && cfg.keys?.gemini) {
             this.providers.push(new GeminiProvider('gemini-2.0-flash', 'Gemini Flash (Fallback)', 'Fallback', undefined, 'gemini-2.0-flash'));
         }
+        // Phase 35: OpenRouter joins the fallback chain whenever a key exists —
+        // position in the chain stays user-configured (primary first), never hardcoded.
+        if (primary !== 'openrouter' && (cfg.keys?.openrouter || process.env.OPENROUTER_API_KEY)) {
+            const { OpenRouterProvider } = await import('./providers/openrouter.js');
+            const fbModel = cfg.agent?.model?.startsWith('openrouter/')
+                ? cfg.agent.model
+                : `openrouter/${cfg.agent?.model || 'anthropic/claude-3.5-sonnet'}`;
+            this.providers.push(new OpenRouterProvider(fbModel, 'Fallback'));
+        }
+
+        // Phase 34: Ollama local models — appended as fallback tier so simple
+        // tasks can run locally while complex ones stay on remote providers.
+        if (process.env.ROSE_ENABLE_OLLAMA !== 'false') {
+            try {
+                const { OllamaProvider } = await import('./providers/ollama.js');
+                const models = await OllamaProvider.listModels();
+                for (const m of models.slice(0, 3)) {
+                    this.providers.push(new (OllamaProvider as any)(m.name, 'Local', undefined));
+                }
+                if (models.length > 0) {
+                    console.log(chalk.gray(`[ROUTER] Ollama: ${models.length} local model(s) available (${models.map(m => m.name).join(', ')})`));
+                } else {
+                    console.log(chalk.gray('[ROUTER] Ollama: Offline'));
+                }
+            } catch {
+                console.log(chalk.gray('[ROUTER] Ollama: Offline'));
+            }
+        }
+
+        // Offline mode: strip providers that require the internet unless they
+        // are the only option remaining.
+        if (process.env.ROSE_OFFLINE === 'true') {
+            const localOnly = this.providers.filter(p => p.providerId === 'ollama');
+            if (localOnly.length > 0) this.providers = localOnly;
+        }
     }
 
     public static getProviders(): ModelProvider[] {
         return this.providers;
     }
+
+    /**
+     * Phase 35: context window of the given model when the provider exposes
+     * it. The Context Manager clamps its budget with this — one source of
+     * truth for token logic, no duplication.
+     */
+    public static getContextLimit(modelId?: string): number | undefined {
+        const id = modelId || Config.get().agent?.model;
+        if (!id) return undefined;
+        if (id.startsWith('openrouter/')) {
+            const mod = ModelRouter.openrouterModule as
+                | { OpenRouterProvider?: { getModelInfo(id: string): { contextLength?: number } | undefined } }
+                | null;
+            return mod?.OpenRouterProvider?.getModelInfo(id)?.contextLength;
+        }
+        return undefined;
+    }
+
+    /** Injected by initialize() so getContextLimit works without re-importing. */
+    private static openrouterModule: unknown = null;
 
     public static async route(requirements: ModelRequirements, messages: any[], system?: string): Promise<any> {
         const cfg = Config.get();
@@ -366,6 +450,27 @@ export class ModelRouter {
         }
 
         const candidates = this.providers.filter(p => p.id === preferredModelId).concat(this.providers.filter(p => p.id !== preferredModelId));
+
+        // Phase 35: capability matching (spec 19). When a task requires a
+        // capability like vision, models that advertise it are tried first;
+        // providers with unknown capability stay eligible so non-OpenRouter
+        // fallbacks keep working.
+        if (requirements.capabilities?.includes('vision')) {
+            const visionCapable = (p: ModelProvider): boolean => {
+                if (!p.id.startsWith('openrouter/')) return true; // capability unknown → still eligible
+                const mod = ModelRouter.openrouterModule as
+                    | { OpenRouterProvider?: { getModelInfo(id: string): { supportsVision?: boolean } | undefined } }
+                    | null;
+                const info = mod?.OpenRouterProvider?.getModelInfo(p.id);
+                return info ? info.supportsVision === true : false;
+            };
+            const eligible = candidates.filter(visionCapable);
+            if (eligible.length > 0 && eligible.length < candidates.length) {
+                const rest = candidates.filter(p => !eligible.includes(p));
+                candidates.length = 0;
+                candidates.push(...eligible, ...rest);
+            }
+        }
         
         for (const candidate of candidates) {
             if (candidate.health === 'OPEN') continue;
