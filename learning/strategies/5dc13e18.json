@@ -1,0 +1,19 @@
+{
+  "id": "5dc13e18",
+  "domain": "general",
+  "situation": "Write thorough unit tests and cache the response",
+  "steps": [
+    "Write thorough unit tests and cache the response"
+  ],
+  "successCount": 3,
+  "failureCount": 0,
+  "confidence": 0.6,
+  "sourceTasks": [
+    "ba90ab3c",
+    "1e6e5833",
+    "96490063"
+  ],
+  "status": "OBSERVED",
+  "createdAt": 1787554930213,
+  "updatedAt": 1787554930228
+}

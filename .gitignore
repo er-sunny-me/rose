@@ -1,0 +1,22 @@
+node_modules/
+dist/
+.env
+*.log
+.DS_Store
+.vscode/
+*.js.map
+*.d.ts.map
+
+# Private / Local files
+.gemini/
+data/
+logs/
+memory/
+obsidian_vault/
+*.tgz
+logs.json
+models.txt
+temp_index_snapshot.txt
+test_autonomous.txt
+test_frame.jpg
+voice-fix.txt
