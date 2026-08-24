@@ -1,0 +1,18 @@
+name: Discord Notifications
+
+on:
+  push:
+  pull_request:
+    types: [opened, closed, reopened]
+  issues:
+    types: [opened, closed, reopened]
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Notification to Discord
+        run: |
+          curl -H "Content-Type: application/json" \
+          -d "{\"content\": \"🔔 **Repository Update:** \`${{ github.repository }}\`\n**Event:** \`${{ github.event_name }}\` by **${{ github.actor }}**\n**Commit/Ref:** \`${{ github.ref }}\`\n**Link:** https://github.com/${{ github.repository }}/commit/${{ github.sha }}\"}" \
+          https://discord.com/api/webhooks/1541556184836734976/KBuna8CoSjzcaXHsBccFajDLneRCJ8DEbywiidPzqB-_TA_QBHDsp_ohsLXaYLHv5_mM
