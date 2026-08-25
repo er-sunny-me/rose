@@ -1,4 +1,4 @@
-export interface PerformanceBaseline {
+﻿export interface PerformanceBaseline {
     operation: string;
     metric: 'latency' | 'cpu' | 'memory' | 'cost';
     p50: number;
@@ -59,4 +59,13 @@ export class PerformanceEngine {
         }
         return null;
     }
-}
+
+    /** Phase 36: percentile baselines for the performance widget. */
+    public static getBaselines(): Record<string, { latency?: number; cpu?: number; memory?: number; cost?: number }> {
+        const out: Record<string, any> = {};
+        try {
+            for (const [op, v] of (this as any).baselines?.entries?.() ?? []) out[op] = v;
+        } catch { /* shape varies */ }
+        return out;
+    }}
+

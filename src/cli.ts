@@ -26,6 +26,9 @@ import {
 import { runHealthChecks, summarize as summarizeChecks, CheckResult } from './setup/health.js';
 import { SecurityEngine, AutonomyMode } from './security.js';
 import { LearningStore } from './learning.js';
+import fsSync from 'fs';
+
+function PACKAGE_NAME_LABEL(): string { return 'rose-ai'; }
 
 const args = process.argv.slice(2);
 const command = args[0] || '';
@@ -58,7 +61,7 @@ function printHelp() {
     console.log(chalk.bold('Usage:'));
     console.log('  rose [command] [options]\n');
     console.log(chalk.bold('Commands:'));
-    console.log('  chat        Start interactive text chat with Rose');
+    console.log('  tui         Start the Rose chat TUI (full-screen, shows live model info)');
     console.log('  voice       Start voice mode with Gemini Live');
     console.log('  web         Start the Agent Server and Web Control Panel');
     console.log('  server      Start the Agent Server API directly');
@@ -67,6 +70,11 @@ function printHelp() {
     console.log('  setup       Open the Rose configuration experience (TUI)');
     console.log('  config      Manage configuration (bare `rose config` opens settings)');
     console.log('  update      Check for and apply updates to Rose');
+    console.log(chalk.gray('  update --check / --dry-run'));
+    console.log('  auth        Manage OS-stored credentials (status|set|remove)');
+    console.log('  extensions  Verify/trust/revoke signed extensions');
+    console.log('  browser     Manage saved browser sessions (sessions|logout|clear)');
+    console.log('  mcp-server  Expose Rose read-only tools over MCP stdio');
     console.log('\n' + chalk.bold('Global Options:'));
     console.log('  --help, -h  Show this help message');
     console.log('  --version   Show version information');
@@ -176,8 +184,8 @@ async function runInteractivePrompt() {
     rl.question('What would you like to do?\n> ', (answer) => {
         rl.close();
         const choice = answer.trim().toLowerCase();
-        if (choice === 'chat') {
-            startChat();
+        if (choice === 'chat' || choice === 'tui') {
+            void startTuiChat();
         } else if (choice === 'voice') {
             startVoice();
         } else if (choice === 'web') {
@@ -189,18 +197,26 @@ async function runInteractivePrompt() {
         } else if (choice === 'setup') {
             void runSetupCommand({});
         } else {
-            console.log(chalk.yellow(`Unknown option '${choice}'. Try 'rose chat' or 'rose --help'.`));
+            console.log(chalk.yellow(`Unknown option '${choice}'. Try 'rose tui' or 'rose --help'.`));
             process.exit(0);
         }
     });
 }
 
-async function startChat() {
-    if (!isQuiet) console.log(chalk.cyan('Starting Rose Chat...'));
+/** Phase 36: `rose tui` — full-screen chat TUI (replaces the old readline `rose chat`). */
+async function startTuiChat() {
+    if (!isQuiet) console.log(chalk.cyan('Starting Rose TUI...'));
     await RuntimeLifecycle.boot();
-    const chat = new GeminiLiveChat();
-    await chat.initializeExtensions();
-    await chat.start();
+    const { ChatTui } = await import('./tui/chatApp.js');
+    const chat = new ChatTui();
+    try {
+        await chat.run();
+    } catch (err: any) {
+        if (!String(err.message).includes('NON_INTERACTIVE')) throw err;
+        console.log(chalk.yellow('\nRose TUI needs an interactive terminal.'));
+        console.log(chalk.gray('Non-interactive shells can use the Web Control Panel: ') + chalk.bold.cyan('rose web'));
+        process.exitCode = 1;
+    }
 }
 
 async function startVoice() {
@@ -309,8 +325,9 @@ async function main() {
                 }
                 break;
             }
-            case 'chat':
-                await requireSetupOnce(startChat);
+            case 'tui':
+            case 'chat': // legacy alias — routes to the new TUI
+                await requireSetupOnce(startTuiChat);
                 break;
             case 'voice':
                 await requireSetupOnce(startVoice);
@@ -377,12 +394,189 @@ async function main() {
                 }
                 break;
             }
-            case 'update':
-                console.log(chalk.cyan('Checking for Rose Agent updates...'));
-                console.log(chalk.green('You are on the latest version.'));
+            case 'update': {
+                // Phase 36: real npm-registry-backed update flow.
+                const { checkForUpdate, renderCheck, buildDryRun, selfUpdate, readCurrentVersion } = await import('./update.js');
+                const dryRun = args.includes('--dry-run');
+                try {
+                    const check = await checkForUpdate();
+                    renderCheck(check);
+                    if (args.includes('--check')) break;
+
+                    if (!check.updateAvailable) {
+                        console.log(chalk.green('Nothing to do — already on the latest stable release.'));
+                        break;
+                    }
+
+                    const plan = buildDryRun(check);
+                    if (dryRun) {
+                        console.log(chalk.cyan('\n📋 Update Plan (dry run — nothing installed)'));
+                        console.log(chalk.white(`  Target:   ${plan.target}`));
+                        console.log(chalk.white(`  Command:  ${plan.command}`));
+                        console.log(chalk.white(`  Restart:  ${plan.restartRequired ? 'yes — restart Rose after install' : 'no'}`));
+                        console.log(chalk.white(`  Migration risk: ${plan.migrationRisk}`));
+                        console.log(chalk.white(`  Preserved: OS credentials, config.json, memory/, event store\n`));
+                        break;
+                    }
+
+                    console.log(chalk.yellow(`Installing ${PACKAGE_NAME_LABEL()} ${check.latest} globally...`));
+                    const result = await selfUpdate(check.latest);
+                    if (result.ok) {
+                        console.log(chalk.green(`✓ Installed. Previous version was ${readCurrentVersion()}.`));
+                        console.log(chalk.cyan('Restart Rose to load the new version, then verify with "rose doctor".'));
+                        console.log(chalk.gray('If anything looks wrong: npm install -g rose-ai@' + check.current));
+                    } else {
+                        console.error(chalk.red('✗ Update failed. Previous installation untouched:'));
+                        console.error(chalk.gray(result.output.slice(0, 800)));
+                        process.exitCode = 1;
+                    }
+                } catch (e: any) {
+                    console.error(chalk.red(`✗ Update check failed: ${e.message}`));
+                    console.error(chalk.gray('Check your internet connection / registry availability.'));
+                    process.exitCode = 1;
+                }
                 break;
+            }
+            case 'auth': {
+                // Phase 36 Part B: secure credential management.
+                const { Secrets } = await import('./security/secrets.js');
+                const sub = args[1];
+                if (sub === 'status') {
+                    const { Config } = await import('./config.js');
+                    const cfg = Config.get();
+                    const rows = await Secrets.status({
+                        gemini: cfg.keys?.gemini,
+                        anthropic: cfg.keys?.anthropic,
+                        openai: cfg.keys?.openai,
+                        github: cfg.keys?.github,
+                    });
+                    console.log(chalk.bold.cyan('\n🔐 Credential Status'));
+                    for (const r of rows) {
+                        const src = r.source === 'os-store' ? chalk.green('✓ OS credential store')
+                            : r.source === 'env' ? chalk.cyan('• environment variable')
+                                : r.source === 'plaintext-config' ? chalk.yellow('⚠ plaintext in config (run migration)')
+                                    : chalk.gray('not configured');
+                        console.log(`  ${r.credential.padEnd(22)} ${src}`);
+                    }
+                    console.log();
+                } else if (sub === 'set') {
+                    const cred = args[2];
+                    if (!cred) {
+                        console.log(chalk.yellow('Usage: rose auth set <gemini-api-key|anthropic-api-key|openai-api-key|github-token>'));
+                        console.log(chalk.gray('(value is read via hidden prompt or ROSE_SECRET_VALUE env; never passed as CLI arg)'));
+                        break;
+                    }
+                    const value = process.env.ROSE_SECRET_VALUE || '';
+                    if (!value) {
+                        console.error(chalk.red('Set the value in the ROSE_SECRET_VALUE environment variable for this command.'));
+                        process.exitCode = 1;
+                        break;
+                    }
+                    await Secrets.set(cred, value);
+                    console.log(chalk.green(`✓ Stored ${cred} in the OS credential store.`));
+                } else if (sub === 'remove') {
+                    const cred = args[2];
+                    if (!cred) { console.log(chalk.yellow('Usage: rose auth remove <credential>')); break; }
+                    const removed = await Secrets.remove(cred);
+                    console.log(removed ? chalk.green(`✓ Removed ${cred} from the OS store.`) : chalk.yellow(`${cred} was not present in the OS store.`));
+                } else {
+                    console.log(chalk.bold.cyan('\nUsage: rose auth <status|set|remove> [credential]'));
+                }
+                break;
+            }
+            case 'extensions': {
+                // Phase 36 Part A: provenance management.
+                const sub = args[1];
+                const { TrustedPublisherRegistry, generatePublisherKeyPair, canonicalDigest, verifyInstalledExtension } = await import('./extensions/signing.js');
+                if (sub === 'trust') {
+                    const [, , publisher, keyId] = args;
+                    const keyFile = args[5] || process.env.ROSE_PUBLISHER_KEY_FILE;
+                    if (!publisher || !keyId || !keyFile) {
+                        console.log(chalk.yellow('Usage: rose extensions trust <publisher> <keyId> --key <publicKey.pem>'));
+                        break;
+                    }
+                    const pem = fs.readFileSync(keyFile, 'utf-8');
+                    TrustedPublisherRegistry.trust(publisher, keyId, pem);
+                    console.log(chalk.green(`✓ Publisher "${publisher}" key "${keyId}" is now trusted.`));
+                } else if (sub === 'revoke') {
+                    const publisher = args[2];
+                    if (!publisher) { console.log(chalk.yellow('Usage: rose extensions revoke <publisher> [keyId]')); break; }
+                    TrustedPublisherRegistry.revoke(publisher, args[3]);
+                    console.log(chalk.green(`✓ Revoked publisher "${publisher}"${args[3] ? ` key ${args[3]}` : ' (all keys)'}.`));
+                } else if (sub === 'verify' || sub === 'inspect') {
+                    const dir = path.resolve(args[2] || path.join(process.cwd(), 'plugins'));
+                    let targets: string[] = [];
+                    if (fsSync.existsSync(dir) && fsSync.statSync(dir).isDirectory()) {
+                        targets = fsSync.readdirSync(dir).map(d => path.join(dir, d)).filter(d => fsSync.existsSync(path.join(d, 'extension.json')));
+                    } else if (fsSync.existsSync(path.join(dir, 'extension.json'))) {
+                        targets = [dir];
+                    }
+                    if (targets.length === 0) {
+                        console.log(chalk.yellow(`No extensions found under ${dir}`));
+                        break;
+                    }
+                    for (const t of targets) {
+                        const outcome = verifyInstalledExtension(t);
+                        const name = outcome.manifest?.name || path.basename(t);
+                        console.log(chalk.bold.cyan(`\n📦 ${name}`));
+                        console.log(`  Signature: ${outcome.ok ? chalk.green('✓ Valid') : chalk.red('✗ Invalid')} ` +
+                            chalk.gray(outcome.failure ? `(${outcome.failure})` : ''));
+                        console.log(`  Publisher: ${outcome.manifest?.publisher || chalk.gray('unknown')}`);
+                        console.log(`  Key:       ${outcome.keyId || chalk.gray('—')}`);
+                        console.log(`  Trust:     ${outcome.ok ? chalk.green('Trusted') : chalk.red('BLOCKED')}`);
+                        if (outcome.packageDigest) console.log(chalk.gray(`  Digest:    ${outcome.packageDigest.slice(0, 32)}…`));
+                    }
+                    console.log();
+                } else if (sub === 'generate-key') {
+                    const pair = generatePublisherKeyPair(args[2] || 'publisher-key-1');
+                    const outDir = path.join(process.cwd(), '.rose', 'keys');
+                    fsSync.mkdirSync(outDir, { recursive: true });
+                    fsSync.writeFileSync(path.join(outDir, `${pair.keyId}.private.pem`), pair.privateKeyPem, { mode: 0o600 });
+                    fsSync.writeFileSync(path.join(outDir, `${pair.keyId}.public.pem`), pair.publicKeyPem);
+                    console.log(chalk.green(`✓ Generated Ed25519 keypair "${pair.keyId}" in .rose/keys/`));
+                    console.log(chalk.gray('Share ONLY the public key with users who trust your extensions.'));
+                } else {
+                    console.log(chalk.bold.cyan('\nUsage: rose extensions <verify|inspect|trust|revoke|generate-key> ...'));
+                    console.log(chalk.gray('  verify <dir>                     check signatures'));
+                    console.log(chalk.gray('  trust <publisher> <keyId>        add trusted public key (--key file)'));
+                    console.log(chalk.gray('  revoke <publisher> [keyId]       block a publisher'));
+                    console.log(chalk.gray('  generate-key [keyId]             create an Ed25519 publisher keypair'));
+                }
+                break;
+            }
+            case 'browser': {
+                // Phase 36 Part H: session profile management.
+                const sub = args[1];
+                const { BrowserSessionManager } = await import('./browser/sessions.js');
+                if (sub === 'sessions') {
+                    const sessions = BrowserSessionManager.list();
+                    if (sessions.length === 0) { console.log(chalk.gray('\nNo saved browser sessions.\n')); break; }
+                    console.log(chalk.bold.cyan('\n🌐 Saved Browser Sessions'));
+                    for (const s of sessions) {
+                        const exp = s.expiresAt && s.expiresAt < Date.now() ? chalk.red('EXPIRED') : chalk.green('active');
+                        console.log(`  ${s.profile.padEnd(12)} domains: ${s.allowedDomains.join(', ') || '(any)'} [${exp}]`);
+                    }
+                    console.log();
+                } else if (sub === 'logout') {
+                    const profile = args[2] || 'default';
+                    const ok = BrowserSessionManager.clear(profile);
+                    console.log(ok ? chalk.green(`✓ Cleared browser session "${profile}".`) : chalk.yellow(`No session named "${profile}".`));
+                } else if (sub === 'clear') {
+                    BrowserSessionManager.clearAll();
+                    console.log(chalk.green('✓ All browser sessions cleared.'));
+                } else {
+                    console.log(chalk.bold.cyan('\nUsage: rose browser <sessions|logout|clear> [profile]'));
+                }
+                break;
+            }
+            case 'mcp-server': {
+                // Phase 36 Part J: expose allowlisted read-only tools over MCP stdio.
+                const { startMcpServer } = await import('./mcp-server.js');
+                await startMcpServer();
+                break; // serve until stdin closes
+            }
             default:
-                console.error(chalk.red(`\n✗ Error: Unknown command '${command}'`));
+                console.error(chalk.red(`\n? Error: Unknown command '${command}'`));
                 console.log(chalk.gray(`Run 'rose --help' for usage.`));
                 process.exit(2);
         }

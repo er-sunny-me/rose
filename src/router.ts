@@ -1,4 +1,6 @@
-import { Telemetry } from './telemetry.js';
+﻿import { Telemetry } from './telemetry.js';
+import { Secrets } from './security/secrets.js';
+import { sseLines, jsonLines, type StreamChunk } from './providers/stream.js';
 import chalk from 'chalk';
 import { PreferenceManager } from './learning.js';
 import { FailureInjector } from './reliability/injector.js';
@@ -12,6 +14,8 @@ export interface ModelRequirements {
 }
 
 export interface ModelProvider {
+    /** Optional SSE streaming; routers fall back to buffered execute(). */
+    stream?(messages: any[], system?: string, maxTokens?: number): AsyncGenerator<any>;
     id: string;
     name: string;
     tier?: string;
@@ -23,7 +27,7 @@ export interface ModelProvider {
     execute(messages: any[], system?: string, maxTokens?: number): Promise<any>;
 }
 
-// ─── Google Gemini (Direct REST API) ───
+// â”€â”€â”€ Google Gemini (Direct REST API) â”€â”€â”€
 export class GeminiProvider implements ModelProvider {
     public id: string;
     public name: string;
@@ -32,7 +36,7 @@ export class GeminiProvider implements ModelProvider {
     public providerId?: string;
     public health: 'HEALTHY' | 'DEGRADED' | 'OPEN' = 'HEALTHY';
     public failures = 0;
-    
+
     constructor(id: string, name: string, tier?: string, badge?: string, providerId?: string) {
         this.id = id;
         this.name = name;
@@ -50,7 +54,7 @@ export class GeminiProvider implements ModelProvider {
             throw new Error(`[Lab] Simulated provider outage for ${this.id}`);
         }
 
-        const apiKey = Config.get().keys?.gemini || process.env.GEMINI_API_KEY;
+        const apiKey = await Secrets.get('gemini-api-key', Config.get().keys?.gemini) ?? undefined;
         if (!apiKey) {
             throw new Error("Missing Gemini API Key. Run 'rose setup' or add keys.gemini in ~/.rose/config.json");
         }
@@ -101,9 +105,42 @@ export class GeminiProvider implements ModelProvider {
             throw e;
         }
     }
+
+    /** Gemini SSE streaming (streamGenerateContent). */
+    public async *stream(messages: any[], system?: string, maxTokens: number = 8192): AsyncGenerator<any> {
+        const apiKey = await Secrets.get('gemini-api-key', Config.get().keys?.gemini) ?? undefined;
+        if (!apiKey) throw new Error('Missing Gemini API Key for streaming.');
+
+        const contents = messages.map(m => ({
+            role: m.role === 'assistant' ? 'model' : m.role,
+            parts: [{ text: m.content }]
+        }));
+        const body: any = { contents, generationConfig: { maxOutputTokens: maxTokens } };
+        if (system) body.systemInstruction = { parts: [{ text: system }] };
+
+        const modelName = this.providerId || 'gemini-2.0-flash';
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:streamGenerateContent?alt=sse&key=${apiKey}`;
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        if (!response.ok || !response.body) throw new Error(`Gemini stream error ${response.status}`);
+
+        for await (const payload of sseLines(response.body)) {
+            if (!payload || payload === '[DONE]') continue;
+            try {
+                const json = JSON.parse(payload);
+                const text = json.candidates?.[0]?.content?.parts?.[0]?.text;
+                if (text) yield text;
+            } catch { /* partial frames are skipped */ }
+        }
+        this.failures = 0;
+        this.health = 'HEALTHY';
+    }
 }
 
-// ─── Anthropic Claude (Direct REST API) ───
+// â”€â”€â”€ Anthropic Claude (Direct REST API) â”€â”€â”€
 export class AnthropicProvider implements ModelProvider {
     public id: string;
     public name: string;
@@ -124,7 +161,7 @@ export class AnthropicProvider implements ModelProvider {
     public async execute(messages: any[], system?: string, maxTokens: number = 8192): Promise<any> {
         if (this.health === 'OPEN') throw new Error(`Circuit Breaker OPEN for ${this.id}`);
 
-        const apiKey = Config.get().keys?.anthropic || process.env.ANTHROPIC_API_KEY;
+        const apiKey = await Secrets.get('anthropic-api-key', Config.get().keys?.anthropic) ?? undefined;
         if (!apiKey) {
             throw new Error("Missing Anthropic API Key. Run 'rose setup' or add keys.anthropic in ~/.rose/config.json");
         }
@@ -163,6 +200,41 @@ export class AnthropicProvider implements ModelProvider {
             throw e;
         }
     }
+
+    /** Anthropic SSE streaming (stream: true). */
+    public async *stream(messages: any[], system?: string, maxTokens: number = 8192): AsyncGenerator<any> {
+        const apiKey = await Secrets.get('anthropic-api-key', Config.get().keys?.anthropic) ?? undefined;
+        if (!apiKey) throw new Error('Missing Anthropic API Key for streaming.');
+
+        const body: any = {
+            model: this.providerId,
+            max_tokens: maxTokens,
+            messages,
+            stream: true,
+        };
+        if (system) body.system = system;
+
+        const response = await fetch('https://api.anthropic.com/v1/messages', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'x-api-key': apiKey,
+                'anthropic-version': '2023-06-01',
+            },
+            body: JSON.stringify(body),
+        });
+        if (!response.ok || !response.body) throw new Error(`Anthropic stream error ${response.status}`);
+
+        for await (const payload of sseLines(response.body)) {
+            if (!payload || payload === '[DONE]') continue;
+            try {
+                const evt = JSON.parse(payload);
+                if (evt.type === 'content_block_delta' && evt.delta?.text) yield evt.delta.text;
+            } catch { /* skip partial */ }
+        }
+        this.failures = 0;
+        this.health = 'HEALTHY';
+    }
 }
 
 // ─── OpenAI GPT (Direct REST API) ───
@@ -186,7 +258,7 @@ export class OpenAIProvider implements ModelProvider {
     public async execute(messages: any[], system?: string, maxTokens: number = 8192): Promise<any> {
         if (this.health === 'OPEN') throw new Error(`Circuit Breaker OPEN for ${this.id}`);
 
-        const apiKey = Config.get().keys?.openai || process.env.OPENAI_API_KEY;
+        const apiKey = await Secrets.get('openai-api-key', Config.get().keys?.openai) ?? undefined;
         if (!apiKey) {
             throw new Error("Missing OpenAI API Key. Run 'rose setup' or add keys.openai in ~/.rose/config.json");
         }
@@ -228,6 +300,39 @@ export class OpenAIProvider implements ModelProvider {
             else this.health = 'DEGRADED';
             throw e;
         }
+    }
+
+    /** OpenAI-compatible SSE streaming (also used by OpenRouter). */
+    public async *stream(messages: any[], system?: string, maxTokens: number = 8192): AsyncGenerator<any> {
+        const apiKey = await Secrets.get('openai-api-key', Config.get().keys?.openai) ?? undefined;
+        if (!apiKey) throw new Error('Missing OpenAI API Key for streaming.');
+
+        const chatMessages = system ? [{ role: 'system', content: system }, ...messages] : messages;
+        const response = await fetch('https://api.openai.com/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${apiKey}`,
+            },
+            body: JSON.stringify({
+                model: this.providerId,
+                messages: chatMessages,
+                max_tokens: maxTokens,
+                stream: true,
+            }),
+        });
+        if (!response.ok || !response.body) throw new Error(`OpenAI stream error ${response.status}`);
+
+        for await (const payload of sseLines(response.body)) {
+            if (!payload || payload === '[DONE]') continue;
+            try {
+                const evt = JSON.parse(payload);
+                const delta = evt.choices?.[0]?.delta?.content;
+                if (delta) yield delta;
+            } catch { /* skip partial */ }
+        }
+        this.failures = 0;
+        this.health = 'HEALTHY';
     }
 }
 
@@ -283,7 +388,7 @@ export class ProxyProvider implements ModelProvider {
             this.failures++;
             if (this.failures > 3) this.health = 'OPEN';
             else this.health = 'DEGRADED';
-            throw new Error(`Failed to reach proxy at ${proxyUrl} — is antigravity-proxy-ai running? Error: ${e.message}`);
+            throw new Error(`Failed to reach proxy at ${proxyUrl} â€” is antigravity-proxy-ai running? Error: ${e.message}`);
         }
     }
 }
@@ -310,7 +415,7 @@ export class ModelRouter {
             this.providers.push(new OpenAIProvider('gpt-4o-mini', 'GPT-4o Mini', 'Fast', undefined, 'gpt-4o-mini'));
             this.providers.push(new OpenAIProvider('gpt-4-turbo', 'GPT-4 Turbo', 'Powerful', undefined, 'gpt-4-turbo'));
         } else if (primary === 'openrouter') {
-            // Phase 35: discovery-driven registration. No fake model list —
+            // Phase 35: discovery-driven registration. No fake model list â€”
             // models come from OpenRouter's /models endpoint; when discovery
             // fails we still register the explicitly configured model.
             const { OpenRouterProvider } = await import('./providers/openrouter.js');
@@ -369,7 +474,7 @@ export class ModelRouter {
         if (primary !== 'gemini' && cfg.keys?.gemini) {
             this.providers.push(new GeminiProvider('gemini-2.0-flash', 'Gemini Flash (Fallback)', 'Fallback', undefined, 'gemini-2.0-flash'));
         }
-        // Phase 35: OpenRouter joins the fallback chain whenever a key exists —
+        // Phase 35: OpenRouter joins the fallback chain whenever a key exists â€”
         // position in the chain stays user-configured (primary first), never hardcoded.
         if (primary !== 'openrouter' && (cfg.keys?.openrouter || process.env.OPENROUTER_API_KEY)) {
             const { OpenRouterProvider } = await import('./providers/openrouter.js');
@@ -379,7 +484,7 @@ export class ModelRouter {
             this.providers.push(new OpenRouterProvider(fbModel, 'Fallback'));
         }
 
-        // Phase 34: Ollama local models — appended as fallback tier so simple
+        // Phase 34: Ollama local models â€” appended as fallback tier so simple
         // tasks can run locally while complex ones stay on remote providers.
         if (process.env.ROSE_ENABLE_OLLAMA !== 'false') {
             try {
@@ -409,10 +514,57 @@ export class ModelRouter {
     public static getProviders(): ModelProvider[] {
         return this.providers;
     }
+    /**
+     * Phase 36: streaming route. ONE pipeline consumed by CLI, API and SDK.
+     * Falls back to buffered execute() for providers without native streaming.
+     */
+    public static async *routeStream(requirements: ModelRequirements, messages: any[], system?: string): AsyncGenerator<StreamChunk> {
+        const cfg = Config.get();
+        const preferredModelId = requirements.preferredModelId || cfg.agent?.model || this.providers[0]?.id;
+        const candidates = this.providers.filter(p => p.health !== 'OPEN');
+        const ordered = [
+            ...candidates.filter(p => p.id === preferredModelId),
+            ...candidates.filter(p => p.id !== preferredModelId),
+        ];
+
+        if (ordered.length === 0) {
+            yield { type: 'error', content: 'No providers available' } as StreamChunk;
+            return;
+        }
+
+        yield { type: 'status', content: `routing to ${ordered[0].name}` };
+
+        for (const candidate of ordered) {
+            try {
+                if (candidate.stream) {
+                    for await (const delta of candidate.stream(messages, system, requirements.maxTokens)) {
+                        if (delta) yield { type: 'text.delta', content: typeof delta === 'string' ? delta : String(delta) };
+                    }
+                } else {
+                    const result = await candidate.execute(messages, system, requirements.maxTokens);
+                    let text = '';
+                    if (result?.content && Array.isArray(result.content)) {
+                        text = result.content.map((p: any) => p.text || '').join('');
+                    } else if (result?.choices?.[0]?.message?.content) {
+                        text = result.choices[0].message.content;
+                    }
+                    if (text) yield { type: 'text.delta', content: text };
+                }
+                Telemetry.recordEvent('model.stream', 'model', 'completed');
+                yield { type: 'done' };
+                return;
+            } catch (e: any) {
+                Telemetry.recordEvent('model.stream_failed', 'model', 'failed', undefined, { error: e.message, provider: candidate.id });
+                yield { type: 'status', content: `${candidate.name} failed (${String(e.message).slice(0, 80)}), falling back...` };
+                continue;
+            }
+        }
+        yield { type: 'error', content: 'All providers failed during streaming' };
+    }
 
     /**
      * Phase 35: context window of the given model when the provider exposes
-     * it. The Context Manager clamps its budget with this — one source of
+     * it. The Context Manager clamps its budget with this â€” one source of
      * truth for token logic, no duplication.
      */
     public static getContextLimit(modelId?: string): number | undefined {
@@ -457,7 +609,7 @@ export class ModelRouter {
         // fallbacks keep working.
         if (requirements.capabilities?.includes('vision')) {
             const visionCapable = (p: ModelProvider): boolean => {
-                if (!p.id.startsWith('openrouter/')) return true; // capability unknown → still eligible
+                if (!p.id.startsWith('openrouter/')) return true; // capability unknown â†’ still eligible
                 const mod = ModelRouter.openrouterModule as
                     | { OpenRouterProvider?: { getModelInfo(id: string): { supportsVision?: boolean } | undefined } }
                     | null;
@@ -495,3 +647,6 @@ export class ModelRouter {
         throw new Error("All providers failed. Check your API keys with 'rose setup' or ensure antigravity-proxy-ai is running.");
     }
 }
+
+
+

@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react';
 import { BrowserRouter, Routes, Route, Link, useLocation } from 'react-router-dom';
-import { Settings, Plus, Ghost, BarChart2 } from 'lucide-react';
+import { Settings, Plus, Ghost, BarChart2, Activity as ObsIcon } from 'lucide-react';
 import Overview from './pages/Overview';
 import Chat from './pages/Chat';
 import SettingsPage from './pages/Settings';
+import Observability from './pages/Observability';
 import { checkAuth, getApiToken, setApiToken, hasApiToken } from './api';
 
 const Sidebar = () => {
@@ -22,6 +23,10 @@ const Sidebar = () => {
         <Link to="/" className={`nav-item ${location.pathname === '/' ? 'active' : ''}`}>
           <BarChart2 size={18} style={{ color: location.pathname === '/' ? 'var(--accent-red)' : 'var(--text-secondary)' }} />
           <span>Overview</span>
+        </Link>
+        <Link to="/observability" className={`nav-item ${location.pathname === '/observability' ? 'active' : ''}`}>
+          <ObsIcon size={18} style={{ color: location.pathname === '/observability' ? 'var(--accent-red)' : 'var(--text-secondary)' }} />
+          <span>Observability</span>
         </Link>
       </div>
 
@@ -153,6 +158,7 @@ function App() {
             <Route path="/" element={<Overview />} />
             <Route path="/chat" element={<Chat />} />
             <Route path="/settings" element={<SettingsPage />} />
+            <Route path="/observability" element={<Observability />} />
           </Routes>
         </div>
       </div>

@@ -1,5 +1,18 @@
 # 🎉 Latest Updates
 
+## Phase 36 — `rose tui` Chat (replaces `rose chat`)
+
+Text chat is now a proper full-screen terminal app built on the Rose TUI engine:
+
+- **`rose tui`** opens a scrollable transcript + input; `rose chat` still works as an alias.
+- Right-side **MODEL panel** shows what's actually running: provider, model id,
+  capability tier (High/Low/Local/Backup), context window in k, live health dot —
+  with tools / vision / $-per-Mtok chips when discovery provides them.
+- **LAST REPLY panel** names the model that *actually* answered (router fallbacks
+  are visible, never hidden), response time, tokens in→out and API-reported cost.
+- Streaming replies render token-by-token where the provider supports it.
+- Keys: Enter send · ↑↓ scroll history · Ctrl+L clear · Esc quit-confirm · Ctrl+C instant exit.
+
 ## Phase 35 — OpenRouter Provider (Aug 2026)
 
 OpenRouter is now a first-class provider inside the existing Model Router — no
@@ -332,3 +345,21 @@ Version: 2.0 (Auto-Connect + Voice Input Ready)
 ## Quality
 - **128 unit tests** (Vitest) across policy engine, capability router, memory, transactions, security redaction/injection, command sandbox (36 cases incl. traversal/symlink/junction), server auth, vector memory, Obsidian RAG, GitHub (mocked API), browser (live local pages), Ollama (offline/mocked).
 - **CI** (GitHub Actions): test matrix (Ubuntu/Windows/macOS × Node 20/22), build verification, npm pack + secret scan + clean-dir install smoke test. No auto-publishing.
+
+---
+
+# Phase 36 - Security Hardening + Streaming + Observability + Storage + MCP + Docker
+
+- **Extension signing**: Ed25519 (Node crypto) over canonical payload digest; trusted-publisher registry; revoked keys blocked even with valid signatures; unsigned blocked unless dev-mode. CLI: rose extensions verify|trust|revoke|generate-key.
+- **Secure credentials**: SecretStore with DPAPI roundtrip-probe -> AES-256-GCM file fallback; priority store > env > legacy plaintext; rose auth status|set|remove; Model Router reads keys through Secrets.
+- **Rate limiting**: express-rate-limit per endpoint class (health/api/chat/admin/ws) + failed-auth lockout with progressive backoff keyed by IP+token-hash; Retry-After on 429.
+- **Real update**: npm registry version check (--check / --dry-run / self-update) with semver validation, prerelease guard, exact-version install only.
+- **Token streaming**: Gemini SSE / Anthropic SSE / OpenAI+OpenRouter SSE / Ollama JSONL -> ModelRouter.routeStream -> same pipeline for CLI live output and API SSE (stream:true).
+- **Observability dashboard**: new Web UI page (health/cost/SLO/performance/capacity/bottleneck widgets); new /api/v1/slo|costs|performance feeds; 5s live polling.
+- **Memory consolidation**: duplicate/related clustering -> fast-tier summarization -> ARCHIVE originals with evidence frontmatter; protected types exempt; AutomationHandlers reuse the existing cron engine (ROSE_MEMORY_CONSOLIDATION_CRON).
+- **Browser sessions**: opt-in persistence (ROSE_BROWSER_PERSIST) under .rose/browser-sessions with domain scoping + expiry; rose browser sessions|logout|clear.
+- **SQLite vectors**: VectorRepository abstraction (JSON default, ROSE_VECTOR_BACKEND=sqlite), better-sqlite3 + sqlite-vec where loadable, JSON->SQLite migration with backup kept, embedding-model version invalidation.
+- **MCP server**: rose mcp-server exposes a read-only allowlist (memory search, obsidian search, project status) over stdio; every call passes SecurityEngine/PolicyEngine; audit events in Event Store.
+- **Docker**: multi-stage non-root image with HEALTHCHECK (/health) + compose.yaml with localhost-only binding and documented volumes.
+
+Tests: 154 unit tests green (extension tamper/revocation, secrets, lockout progression, update logic, consolidation reversibility, dual-backend vector isolation). Typecheck + build clean. Live checks: rose update --check against registry.npmjs.org OK; server auth 401/200 probes OK.

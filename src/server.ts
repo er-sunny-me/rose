@@ -1,4 +1,4 @@
-import express from 'express';
+﻿import express from 'express';
 import cors from 'cors';
 import http from 'http';
 import path from 'path';
@@ -34,6 +34,7 @@ import { MetricsSystem, HealthMonitor, SLOSystem, CapacityEngine, CostEngine, Pe
 import { PolicyStore } from './policy/store.js';
 import { Config } from './config.js';
 import { AuthService, authenticateRequest, authorizeRequest } from './server/auth.js';
+import { lockoutGuard, noteAuthFailure, clearLockout, limiterFor } from './server/ratelimit.js';
 import chalk from 'chalk';
 
 export class AgentServer {
@@ -54,9 +55,22 @@ export class AgentServer {
         this.app.use(cors());
         this.app.use(express.json());
         // Phase 34: every API route requires a valid bearer token.
-        // /health and /ready remain public for liveness probes.
-        this.app.use(authenticateRequest);
-        this.app.use(authorizeRequest);
+        // Phase 36: lockout gate runs before token verification so locked
+        // identities never reach the comparison. /health + /ready stay public.
+        this.app.use(lockoutGuard);
+        this.app.use((req, res, next) => {
+            limiterFor(req.path)(req, res, (err?: any) => {
+                if (err) return next(err);
+                const wasAuthed = res.locals?.authAttempted;
+                next();
+            });
+        });
+        this.app.use((req, res, next) => {
+            authenticateRequest(req, res, () => {
+                clearLockout(req);
+                authorizeRequest(req, res, next);
+            });
+        });
         this.setupRoutes();
     }
 
@@ -70,6 +84,11 @@ export class AgentServer {
         this.app.get('/api/v1/capacity', (req, res) => res.json({ forecast: CapacityEngine.forecastQueueSaturation() }));
         this.app.get('/api/v1/bottlenecks', (req, res) => res.json({ bottleneck: BottleneckAnalyzer.analyze() }));
         this.app.get('/api/v1/optimizations', (req, res) => res.json(OptimizationEngine.getCandidates()));
+
+        // Phase 36: observability dashboard feeds.
+        this.app.get('/api/v1/slo', (req, res) => res.json({ slos: SLOSystem.getAll() }));
+        this.app.get('/api/v1/costs', (req, res) => res.json(CostEngine.getSummary()));
+        this.app.get('/api/v1/performance', (req, res) => res.json(PerformanceEngine.getBaselines()));
 
         this.app.get('/health', (req, res) => {
             res.json({ status: 'healthy', processId: process.pid, uptime: process.uptime() });
@@ -181,6 +200,38 @@ export class AgentServer {
                         content: msg.parts[0]?.text || ''
                     }));
                     messages.push({ role: 'user', content: finalPrompt });
+
+                    // Phase 36: token streaming over SSE when the client asks
+                    // for it (stream:true). Same routeStream the CLI uses.
+                    if (req.body.stream === true) {
+                        res.writeHead(200, {
+                            'Content-Type': 'text/event-stream',
+                            'Cache-Control': 'no-cache',
+                            'Connection': 'keep-alive'
+                        });
+                        let full = '';
+                        try {
+                            for await (const chunk of ModelRouter.routeStream(
+                                { intent: 'generation', maxTokens: 8192, preferredModelId: req.body.modelId },
+                                messages,
+                                getSystemInstruction()
+                            )) {
+                                if (chunk.type === 'text.delta' && chunk.content) {
+                                    full += chunk.content;
+                                    res.write(`data: ${JSON.stringify({ type: 'text.delta', content: chunk.content })}\n\n`);
+                                } else if (chunk.type === 'status') {
+                                    res.write(`data: ${JSON.stringify({ type: 'status', content: chunk.content })}\n\n`);
+                                }
+                            }
+                            session.chatHistory.push({ role: 'user', parts: [{ text: finalMessage }] });
+                            session.chatHistory.push({ role: 'model', parts: [{ text: full }] });
+                            res.write(`data: ${JSON.stringify({ type: 'completion', result: full })}\n\n`);
+                        } catch (e: any) {
+                            res.write(`data: ${JSON.stringify({ type: 'error', message: e.message })}\n\n`);
+                        }
+                        res.end();
+                        return;
+                    }
 
                     const data = await ModelRouter.route(
                         { intent: 'generation', maxTokens: 8192, preferredModelId: req.body.modelId },
@@ -416,12 +467,12 @@ export class AgentServer {
     public start() {
         LearningStore.init();
         this.server = this.app.listen(this.port, this.host, () => {
-            console.log(chalk.green(`🚀 Agent Server running at http://${this.host}:${this.port}`));
+            console.log(chalk.green(`ðŸš€ Agent Server running at http://${this.host}:${this.port}`));
 
             if (this.host !== '127.0.0.1' && this.host !== 'localhost') {
                 console.log(chalk.bold.red(''));
-                console.log(chalk.bold.red('⚠️  WARNING: Rose will be accessible from other devices on your network.'));
-                console.log(chalk.bold.red('⚠️  Authentication is required. Clients must send the API token:'));
+                console.log(chalk.bold.red('âš ï¸  WARNING: Rose will be accessible from other devices on your network.'));
+                console.log(chalk.bold.red('âš ï¸  Authentication is required. Clients must send the API token:'));
                 console.log(chalk.bold.red(`    Authorization: Bearer <token from .rose/auth-token>`));
                 console.log(chalk.bold.red(''));
             } else {
@@ -468,3 +519,4 @@ export class AgentServer {
         });
     }
 }
+

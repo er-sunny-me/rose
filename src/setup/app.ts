@@ -114,6 +114,12 @@ export class SetupApp {
     memoryStats = '';
     projectInfo = '';
     dashboardIdx = 0;
+
+    /** Flat navigation model for the AI Provider screen (bugfix: stored on
+     * the app instance so state survives regardless of module loading). */
+    providerRows: Array<{ kind: 'provider' | 'cred' | 'model' | 'modelText' | 'action'; id?: string; value?: string; field?: string; btn?: number }> = [];
+    prCursor = 0;
+    prCursorInit = false;
     lastDiff: ConfigChange[] = [];
     lastApplyError: string | null = null;
 

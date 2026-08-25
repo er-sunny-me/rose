@@ -21,6 +21,7 @@ import {
 import {
     DraftConfig, defaultModelFor, envCredentialDetected, detectProject,
     resolveWorkspacePath, maskSecret, diffAgainstCurrent, configFileExists,
+    type FieldKey,
 } from './configService.js';
 import {
     probeProvider, isPortFree, findFreePort, summarize, CheckResult,
@@ -115,194 +116,220 @@ function renderWelcome(app: SetupApp, w: number): Fragment {
     return frag(lines.slice(0, Math.max(8, w)));
 }
 
-// ═══ AI PROVIDER ══════════════════════════════════════════
+// ═══ AI PROVIDER ═════════════════════════════════════════
+
+/**
+ * AI Provider screen — FLAT CURSOR navigation (bugfix: ↑↓ ab har visible row
+ * par chalte hain). Enter/click activates; typing edits the focused field.
+ */
+type CredField = 'geminiKey' | 'anthropicKey' | 'openaiKey' | 'openrouterKey' | 'proxyUrl';
+
+type ProviderRow =
+    | { kind: 'provider'; id: DraftConfig['provider'] }
+    | { kind: 'cred'; field: CredField }
+    | { kind: 'model'; value: string }
+    | { kind: 'modelText' }
+    | { kind: 'action'; btn: 0 | 1 };
+
+const CRED_FIELD_BY_PROVIDER: Partial<Record<DraftConfig['provider'], {
+    field: CredField; masked: boolean; label: string; placeholder?: string;
+}>> = {
+    gemini: { field: 'geminiKey', masked: true, label: 'Gemini API Key', placeholder: 'paste key — kept local, never displayed' },
+    anthropic: { field: 'anthropicKey', masked: true, label: 'Anthropic API Key', placeholder: 'paste key — kept local, never displayed' },
+    openai: { field: 'openaiKey', masked: true, label: 'OpenAI API Key', placeholder: 'paste key — kept local, never displayed' },
+    openrouter: { field: 'openrouterKey', masked: true, label: 'OpenRouter API Key', placeholder: 'sk-or-… kept local, never displayed' },
+    proxy: { field: 'proxyUrl', masked: false, label: 'Proxy URL' },
+};
+
+/** Reset per-provider discovery caches when the user switches provider. */
+function selectProvider(app: SetupApp, id: DraftConfig['provider']): void {
+    const d = app.draft;
+    if (d.provider === id) return;
+    d.provider = id;
+    d.model = defaultModelFor(id);
+    app.markDirty();
+    app.testResult = null;
+    stSet(app, 'proxy.models', null);
+    stSet(app, 'proxy.fetched', false);
+    stSet(app, 'openrouter.models', null);
+    stSet(app, 'openrouter.fetched', false);
+}
+
+function activateProviderAction(app: SetupApp, btn: 0 | 1): void {
+    if (btn === 0) void runProviderTest(app);
+    else app.stepForward();
+}
 
 function renderProvider(app: SetupApp, w: number): Fragment {
     const t = app.theme;
     const d = app.draft;
-    const focus = st<number>(app, 'provider.focus', 0);
     const lines: string[] = [];
     const hits = new Map<number, () => void>();
-    const row = () => lines.length;
 
-    // Focus anchors for scroll-following
-    let credAnchorRow = -1;
-    let modelAnchorRow = -1;
-    let actionAnchorRow = -1;
+    // Kick off async model discovery early so results appear on a later frame.
+    let orModels = st<Array<OpenRouterModelInfo> | null>(app, 'openrouter.models', null);
+    if (d.provider === 'openrouter' && !st<boolean>(app, 'openrouter.fetched', false)) {
+        stSet(app, 'openrouter.fetched', true);
+        OpenRouterProvider.listModels().then(list => {
+            const picked = list
+                .filter(m => m.supportsTools !== false)
+                .sort((a, b) => (b.contextLength ?? 0) - (a.contextLength ?? 0))
+                .slice(0, 8);
+            stSet(app, 'openrouter.models', picked.length > 0 ? picked : list.slice(0, 8));
+        }).catch(() => {});
+    }
+    let proxyModels = st<Array<{ id: string; tier?: string }> | null>(app, 'proxy.models', null);
+    if (d.provider === 'proxy' && !st<boolean>(app, 'proxy.fetched', false)) {
+        stSet(app, 'proxy.fetched', true);
+        fetchProxyModels(d.proxyUrl).then(list => stSet(app, 'proxy.models', list)).catch(() => {});
+    }
+
+    // ── Build interactive row model FIRST so ↑↓ can traverse every visible row ──
+    const rowModel: ProviderRow[] = [];
+    for (const p of PROVIDER_CHOICES) rowModel.push({ kind: 'provider', id: p.id });
+    const cred = CRED_FIELD_BY_PROVIDER[d.provider];
+    if (cred) rowModel.push({ kind: 'cred', field: cred.field });
+
+    if (d.provider === 'openrouter') {
+        if (orModels && orModels.length > 0) {
+            for (const m of orModels) rowModel.push({ kind: 'model', value: `openrouter/${m.id}` });
+        } else {
+            rowModel.push({ kind: 'modelText' });
+        }
+    } else if (d.provider === 'proxy') {
+        if (proxyModels && proxyModels.length > 0) {
+            for (const m of proxyModels.slice(0, 6)) rowModel.push({ kind: 'model', value: m.id });
+        } else {
+            rowModel.push({ kind: 'modelText' });
+        }
+    } else {
+        for (const m of MODELS_BY_PROVIDER[d.provider] ?? []) rowModel.push({ kind: 'model', value: m.id });
+    }
+    rowModel.push({ kind: 'action', btn: 0 });
+    rowModel.push({ kind: 'action', btn: 1 });
+    app.providerRows = rowModel;
+
+    // Cursor default: currently selected provider row (first render only).
+    if (!app.prCursorInit) {
+        app.prCursor = Math.max(0, rowModel.findIndex(r => r.kind === 'provider' && r.id === d.provider));
+        app.prCursorInit = true;
+      }
+    let cursor = app.prCursor;
+    cursor = Math.max(0, Math.min(cursor, rowModel.length - 1));
+    app.prCursor = cursor;
+
+    // Absolute screen line of each row entry → scroll anchor follows the cursor.
+    const absOfRow = new Array<number>(rowModel.length).fill(-1);
 
     lines.push(heading(t, 'AI Provider'));
     lines.push('');
 
-    // 1. Provider list
-    const providerItems: SelectItem[] = PROVIDER_CHOICES.map(p => ({
-        label: p.label,
-        hint: p.hint,
-        value: p.id,
-    }));
-    const provIdx = Math.max(0, PROVIDER_CHOICES.findIndex(p => p.id === d.provider));
-    const providerListStart = lines.length;
-    const provFrag = selectList(t, providerItems, provIdx, undefined);
-    // highlight handled via focus; clicking selects immediately
-    PROVIDER_CHOICES.forEach((p, i) => {
-        hits.set(row() + i, () => {
-            if (d.provider !== p.id) {
-                d.provider = p.id;
-                d.model = defaultModelFor(p.id);
-                app.markDirty();
-                app.testResult = null;
-                stSet(app, 'proxy.models', null);
-            }
-            stSet(app, 'provider.focus', 0);
+    // ── Provider list ──
+    rowModel.forEach((r, i) => {
+        if (r.kind !== 'provider') return;
+        absOfRow[i] = lines.length;
+        const p = PROVIDER_CHOICES.find(x => x.id === r.id)!;
+        const selected = d.provider === r.id;
+        const focused = i === cursor;
+        const icon = focused ? t.icons.selected : selected ? t.icons.radioOn : t.icons.radioOff;
+        const painter = focused ? ((x: string) => t.palette.accentBold(x))
+            : selected ? ((x: string) => t.palette.accent(x)) : ((x: string) => t.palette.text(x));
+        lines.push(painter(`${icon} ${p.label}${p.hint ? '  ' + t.palette.dim(p.hint) : ''}`));
+        hits.set(lines.length - 1, () => {
+            selectProvider(app, r.id);
+            app.prCursor = i;
         });
     });
-    lines.push(...provFrag.lines);
 
+    // ── Credentials ──
     lines.push('');
     lines.push(heading(t, 'Credentials'));
-
-    if (d.provider === 'openrouter') {
+    if (cred) {
+        const i = rowModel.findIndex(r2 => r2.kind === 'cred');
         lines.push('');
-        if (d.openrouterKey) {
-            lines.push(t.palette.ok(`${t.icons.check} OpenRouter key ${maskSecret(d.openrouterKey)} — leave blank to keep.`));
-        } else if (envCredentialDetected('openrouter')) {
-            lines.push(t.palette.ok(`${t.icons.check} Environment credential detected (masked).`));
+        const val = String((d as any)[cred.field] ?? '');
+        if (val) {
+            lines.push(t.palette.ok(`${t.icons.check} ${cred.label.replace(' API Key', ' key')} configured (${maskSecret(val)}) — type below to replace.`));
+        } else if (cred.field !== 'proxyUrl') {
+            const envProv = cred.field.replace(/Key$/, '') as 'gemini' | 'anthropic' | 'openai' | 'openrouter';
+            if (envCredentialDetected(envProv)) {
+                lines.push(t.palette.ok(`${t.icons.check} Environment credential detected (masked).`));
+            }
         }
-        credAnchorRow = lines.length + 1;
-        pushLabeledInput(app, lines, hits, 'OpenRouter API Key', 'openrouterKey', '', true, focus === 1, (v) => {
-            d.openrouterKey = v.trim(); app.markDirty(); app.testResult = null;
-        }, 'sk-or-… kept local, never displayed');
-        const err = app.errors.get('openrouterKey');
-        if (err && focus === 1) lines.push(t.palette.error(`${t.icons.cross} ${err}`));
-    }
-    if (d.provider === 'proxy') {
-        lines.push('');
-        stSet(app, 'provider.proxyRow', lines.length + 1);
-        pushLabeledInput(app, lines, hits, 'Proxy URL', 'proxyUrl', d.proxyUrl, false, focus === 1, (v) => {
-            d.proxyUrl = v; app.markDirty();
-        });
-    }
-
-    if (d.provider === 'gemini') {
-        lines.push('');
-        const existing = d.geminiKey ? `configured (${maskSecret(d.geminiKey)})` : null;
-        if (existing) lines.push(t.palette.ok(`${t.icons.check} Gemini key ${existing} — leave blank to keep.`));
-        if (!d.geminiKey && envCredentialDetected('gemini')) {
-            lines.push(t.palette.ok(`${t.icons.check} Environment credential detected (masked).`));
-        }
-        credAnchorRow = lines.length + 1; // label row; field is next
-        pushLabeledInput(app, lines, hits, 'Gemini API Key', 'geminiKey', '', true, focus === 1, (v) => {
-            d.geminiKey = v.trim(); app.markDirty(); app.testResult = null;
-        }, 'paste key — kept local, never displayed');
-        const err = app.errors.get('geminiKey');
-        if (err && focus === 1) lines.push(t.palette.error(`${t.icons.cross} ${err}`));
-    }
-    if (d.provider === 'anthropic') {
-        lines.push('');
-        if (d.anthropicKey) lines.push(t.palette.ok(`${t.icons.check} Anthropic key ${maskSecret(d.anthropicKey)} — leave blank to keep.`));
-        credAnchorRow = lines.length + 1;
-        pushLabeledInput(app, lines, hits, 'Anthropic API Key', 'anthropicKey', '', true, focus === 1, (v) => {
-            d.anthropicKey = v.trim(); app.markDirty(); app.testResult = null;
-        });
-    }
-    if (d.provider === 'openai') {
-        lines.push('');
-        if (d.openaiKey) lines.push(t.palette.ok(`${t.icons.check} OpenAI key ${maskSecret(d.openaiKey)} — leave blank to keep.`));
-        credAnchorRow = lines.length + 1;
-        pushLabeledInput(app, lines, hits, 'OpenAI API Key', 'openaiKey', '', true, focus === 1, (v) => {
-            d.openaiKey = v.trim(); app.markDirty(); app.testResult = null;
-        });
-    }
-    if (d.provider === 'proxy') {
-        // proxy URL input was pushed earlier in the credentials block
-        credAnchorRow = st<number>(app, 'provider.proxyRow', -1);
+        absOfRow[i] = lines.length + 1; // label line; field follows
+        lines.push(t.palette.dim(cred.label));
+        const err = app.errors.get(cred.field as FieldKey);
+        const fieldLines = textInput(t, {
+            value: val,
+            cursorPos: val.length,
+            masked: cred.masked,
+            placeholder: cred.placeholder,
+            error: err ?? undefined,
+        }, Math.min(w, 56));
+        for (const fl of fieldLines) lines.push('  ' + fl);
+        hits.set(lines.length - fieldLines.length, () => { app.prCursor = i; });
     }
 
-    // 2. Model list
+    // ── Default Model ──
     lines.push('');
     lines.push(heading(t, 'Default Model'));
     lines.push('');
-    modelAnchorRow = lines.length;
 
-    if (d.provider === 'proxy') {
-        const models = st<Array<{ id: string; tier?: string }> | null>(app, 'proxy.models', null);
-        const fetched = st<boolean>(app, 'proxy.fetched', false);
-        if (!fetched) {
-            stSet(app, 'proxy.fetched', true);
-            fetchProxyModels(d.proxyUrl).then(list => {
-                stSet(app, 'proxy.models', list);
-            }).catch(() => {});
-        }
-        if (models && models.length > 0) {
-            const items: SelectItem[] = models.map(m => ({ label: m.id, badge: m.tier, value: m.id }));
-            const mf = selectList(t, items, Math.min(st<number>(app, 'proxy.modelIdx', 0), items.length - 1), (v) => {
-                d.model = v; app.markDirty();
-            });
-            mf.rowHits?.forEach((cb, rel) => hits.set(row() + rel, cb));
-            lines.push(...mf.lines.slice(0, 6));
-            if (mf.lines.length > 6) lines.push(t.palette.dim(`… and ${mf.lines.length - 6} more (↑↓ to scroll)`));
-        } else {
-            lines.push(t.palette.warn(`${t.icons.warn} Could not reach proxy yet.`));
-            pushLabeledInput(app, lines, hits, 'Model ID', 'model', d.model, false, false, (v) => {
-                d.model = v; app.markDirty();
-            });
-        }
-    } else if (d.provider === 'openrouter') {
-        // Phase 35: live discovery — real models with real capabilities only.
-        let orModels = st<Array<OpenRouterModelInfo> | null>(app, 'openrouter.models', null);
-        if (!st<boolean>(app, 'openrouter.fetched', false)) {
-            stSet(app, 'openrouter.fetched', true);
-            OpenRouterProvider.listModels().then(list => {
-                // Prefer tool-capable models, largest context first; keep list short.
-                const picked = list
-                    .filter(m => m.supportsTools !== false)
-                    .sort((a, b) => (b.contextLength ?? 0) - (a.contextLength ?? 0))
-                    .slice(0, 8);
-                stSet(app, 'openrouter.models', picked.length > 0 ? picked : list.slice(0, 8));
-            }).catch(() => {});
-        }
+    rowModel.forEach((r, i) => {
+        if (r.kind === 'model') {
+            absOfRow[i] = lines.length;
+            const selected = d.model === r.value;
+            const focused = i === cursor;
+            const icon = focused ? t.icons.selected : selected ? t.icons.radioOn : t.icons.radioOff;
+            const painter = focused ? ((x: string) => t.palette.accentBold(x))
+                : selected ? ((x: string) => t.palette.accent(x)) : ((x: string) => t.palette.text(x));
 
-        if (orModels && orModels.length > 0) {
-            const items: SelectItem[] = orModels.map(m => ({
-                label: `openrouter/${m.id}`,
-                badge: capabilityBadge(m),
-                value: `openrouter/${m.id}`,
-            }));
-            const sel = items.findIndex(i2 => i2.value === d.model);
-            const mf = selectList(t, items, Math.max(0, Math.min(sel, items.length - 1)), (v) => {
-                d.model = v; app.markDirty();
+            let badge = '';
+            if (d.provider === 'openrouter' && orModels) {
+                const info = orModels.find(m => `openrouter/${m.id}` === r.value);
+                if (info) badge = '  ' + t.palette.dim(capabilityBadge(info));
+            } else {
+                const tier = MODELS_BY_PROVIDER[d.provider]?.find(x => x.id === r.value)?.tier;
+                if (tier) badge = '  ' + t.palette.dim(`(${tier})`);
+            }
+
+            lines.push(painter(`${icon} ${r.value}${badge}`));
+            hits.set(lines.length - 1, () => {
+                app.draft.model = r.value; app.markDirty(); app.prCursor = i;
             });
-            mf.rowHits?.forEach((cb, rel) => hits.set(row() + rel, cb));
-            lines.push(...mf.lines);
-            lines.push('');
-            lines.push(t.palette.dim('Badges: context length · T=tools · V=vision — from OpenRouter discovery.'));
-        } else {
-            lines.push(t.palette.warn(`${t.icons.warn} Discovery unavailable — type a valid model id.`));
-            pushLabeledInput(app, lines, hits, 'Model ID', 'model', d.model, false, false, (v) => {
-                d.model = v.startsWith('openrouter/') ? v : `openrouter/${v}`; app.markDirty();
-            }, 'vendor/model e.g. anthropic/claude-3.5-sonnet');
+        } else if (r.kind === 'modelText') {
+            absOfRow[i] = lines.length + 1;
+            lines.push(t.palette.warn(`${t.icons.warn} List unavailable right now — type a valid model id below.`));
+            lines.push(t.palette.dim('Model ID'));
+            const fieldLines = textInput(t, {
+                value: d.model,
+                cursorPos: d.model.length,
+                placeholder: d.provider === 'openrouter' ? 'vendor/model e.g. anthropic/claude-3.5-sonnet' : undefined,
+            }, Math.min(w, 56));
+            for (const fl of fieldLines) lines.push('  ' + fl);
+            hits.set(lines.length - fieldLines.length, () => { app.prCursor = i; });
         }
-    } else {
-        const models = MODELS_BY_PROVIDER[d.provider] ?? [];
-        const modelItems: SelectItem[] = models.map(m => ({ label: m.id, badge: m.tier, value: m.id }));
-        const curIdx = Math.max(0, models.findIndex(m => m.id === d.model));
-        const mf = selectList(t, modelItems, curIdx, (v) => {
-            d.model = v; app.markDirty();
-        });
-        mf.rowHits?.forEach((cb, rel) => hits.set(row() + rel, cb));
-        lines.push(...mf.lines);
+    });
+
+    if (d.provider === 'openrouter' && orModels && orModels.length > 0) {
+        lines.push('');
+        lines.push(t.palette.dim('Badges: context · T=tools · V=vision — live from OpenRouter discovery.'));
     }
 
-    // 3. Actions: Test connection + Continue
+    // ── Actions (each button is its own navigable row) ──
     lines.push('');
     const testLabel = app.testRunning ? 'Testing…' : `${t.icons.check} Test Connection`;
-    const actions = [` ${testLabel} `, ' Continue → '];
-    const actionLine = actions
-        .map((a, i) => (focus === lastFocusIndex(app) ? (i === st<number>(app, 'provider.action', 0)
-            ? t.palette.inverse(a) : t.palette.text(a)) : t.palette.dim(a)))
-        .join('   ');
-    actionAnchorRow = lines.length;
-    hits.set(row(), () => { stSet(app, 'provider.focus', lastFocusIndex(app)); void runProviderTest(app); });
-    lines.push(actionLine);
+    rowModel.forEach((r, i) => {
+        if (r.kind !== 'action') return;
+        absOfRow[i] = lines.length;
+        const active = i === cursor;
+        const label = ` ${r.btn === 0 ? testLabel : 'Continue →'} `;
+        lines.push(active ? t.palette.inverse(label) : t.palette.text(label));
+        hits.set(lines.length - 1, () => {
+            app.prCursor = i;
+            activateProviderAction(app, r.btn);
+        });
+    });
 
     if (app.testResult) {
         lines.push('');
@@ -310,22 +337,10 @@ function renderProvider(app: SetupApp, w: number): Fragment {
         if (app.testResult.fixHint) lines.push(t.palette.dim(`  ${app.testResult.fixHint}`));
     }
 
-    // Publish scroll anchor for the focused control
-    const anchorRow =
-        focus === 0 ? providerListStart + provIdx :
-        focus === 1 ? credAnchorRow :
-        focus === 2 ? modelAnchorRow :
-        actionAnchorRow;
-    stSet(app, 'focusRow', anchorRow >= 0 ? anchorRow : -1);
-
-    function lastFocusIndex(_a: SetupApp): number {
-        return 3; // provider(0) credential(1) model(2) actions(3)
-    }
-
+    uiState.set(app, 'focusRow', absOfRow[cursor] >= 0 ? absOfRow[cursor] : -1);
     return { lines, rowHits: hits };
 }
 
-/** Human-readable capability badge built ONLY from discovered metadata. */
 function capabilityBadge(m: OpenRouterModelInfo): string {
     const parts: string[] = [];
     if (m.contextLength) parts.push(fmtContext(m.contextLength));
@@ -377,35 +392,6 @@ function statusFromCheck(t: Theme, c: CheckResult, w: number): string {
 }
 
 /** Labeled input line pair with hit registration on the field row. */
-function pushLabeledInput(
-    app: SetupApp,
-    lines: string[],
-    hits: Map<number, () => void>,
-    label: string,
-    _binding: string,
-    displayValue: string,
-    masked: boolean,
-    focused: boolean,
-    onChange: (v: string) => void,
-    placeholder?: string
-): void {
-    const t = app.theme;
-    lines.push(t.palette.dim(label));
-    const fieldLines = textInput(app.theme, {
-        value: displayValue,
-        cursorPos: focused ? displayValue.length : 0,
-        masked,
-        placeholder: placeholder ?? (focused ? 'type here' : undefined),
-        error: !focused ? undefined : undefined,
-    }, Math.min(w2(app), 56));
-    for (const fl of fieldLines) lines.push('  ' + fl);
-    hits.set(lines.length - fieldLines.length, () => { /* click focuses this input */ });
-}
-
-function w2(app: SetupApp): number {
-    return app.screen.width;
-}
-
 // ═══ WORKSPACE ════════════════════════════════════════════
 
 function renderWorkspace(app: SetupApp, w: number): Fragment {
@@ -1146,73 +1132,64 @@ function handleWelcome(app: SetupApp, key: KeyMsg): StepNav {
 }
 
 function handleProvider(app: SetupApp, key: KeyMsg): StepNav {
-    const focus = st<number>(app, 'provider.focus', 0);
-    const maxFocus = 3;
+    let rows = app.providerRows;
+    if (rows.length === 0) {
+        // Key arrived before first paint — rebuild the row model (pure fn).
+        try { renderProvider(app, Math.max(46, app.screen.width)); } catch { /* ignore */ }
+        rows = app.providerRows;
+        if (rows.length === 0) return 'continue';
+    }
+
+    let cur = Math.max(0, Math.min(rows.length - 1, app.prCursor));
 
     switch (key.type) {
-        case 'tab': stSet(app, 'provider.focus', (focus + 1) % (maxFocus + 1)); return 'continue';
-        case 'shifttab': stSet(app, 'provider.focus', (focus - 1 + maxFocus + 1) % (maxFocus + 1)); return 'continue';
-        case 'up': {
-            if (focus === 0) {
-                stSet(app, 'provider.focus', maxFocus);
-            } else stSet(app, 'provider.focus', focus - 1);
+        case 'up':
+        case 'shifttab':
+            cur--; break;
+        case 'down':
+        case 'tab':
+            cur++; break;
+        case 'enter':
+        case 'space': {
+            app.prCursor = cur;
+            const r = rows[cur];
+            if (!r) return 'continue';
+            if (r.kind === 'provider' && r.id) selectProvider(app, r.id as DraftConfig['provider']);
+            else if (r.kind === 'model' && r.value) { app.draft.model = r.value; app.markDirty(); }
+            else if (r.kind === 'action' && r.btn !== undefined) activateProviderAction(app, r.btn as 0 | 1);
             return 'continue';
-        }
-        case 'down': {
-            stSet(app, 'provider.focus', (focus + 1) % (maxFocus + 1));
-            return 'continue';
-        }
-        case 'enter': {
-            if (focus === 0) {
-                const cur = PROVIDER_CHOICES.findIndex(p => p.id === app.draft.provider);
-                const next = PROVIDER_CHOICES[(cur + 1) % PROVIDER_CHOICES.length];
-                app.draft.provider = next.id;
-                app.draft.model = defaultModelFor(next.id);
-                app.markDirty();
-                app.testResult = null;
-            } else if (focus === maxFocus) {
-                void runProviderTest(app);
-            } else {
-                return app.stepForward();
-            }
-            return 'continue';
-        }
-        case 'left': case 'right': {
-            if (focus === maxFocus) {
-                // toggle between Test / Continue buttons
-                stSet(app, 'provider.action', 1 - st<number>(app, 'provider.action', 0));
-                return 'continue';
-            }
-            break;
-        }
-        case 'backspace': {
-            if (focus === 1) return editCredential(app, null);
-            break;
         }
         case 'char': {
-            if (focus === 1) return editCredential(app, key.text);
-            break;
+            app.prCursor = cur;
+            applyProviderEdit(app, rows[cur], key.text);
+            return 'continue';
         }
-        default: break;
+        case 'backspace': {
+            app.prCursor = cur;
+            applyProviderEdit(app, rows[cur], null);
+            return 'continue';
+        }
+        default:
+            return 'continue';
     }
+    app.prCursor = Math.max(0, Math.min(rows.length - 1, cur));
     return 'continue';
 }
 
-function editCredential(app: SetupApp, char: string | null): StepNav {
-    const d = app.draft;
-    const field = d.provider === 'gemini' ? 'geminiKey'
-        : d.provider === 'anthropic' ? 'anthropicKey'
-        : d.provider === 'openai' ? 'openaiKey'
-        : d.provider === 'openrouter' ? 'openrouterKey' : 'proxyUrl';
-    const current = (d as any)[field] as string;
-    if (char === null) {
-        (d as any)[field] = current.slice(0, -1);
-    } else {
-        (d as any)[field] = current + char;
-    }
+
+/** Route typed characters to the focused text row (credential or manual model id). */
+function applyProviderEdit(app: SetupApp, row: { kind: string; field?: string } | undefined, ch: string | null): void {
+    if (!row) return;
+    let field: string | null = null;
+    if (row.kind === 'cred' && row.field) field = row.field;
+    else if (row.kind === 'modelText') field = 'model';
+    if (!field) return;
+
+    const d = app.draft as any;
+    if (ch === null) d[field] = String(d[field] ?? '').slice(0, -1);
+    else d[field] = String(d[field] ?? '') + ch;
     app.markDirty();
     app.errors.delete(field as any);
-    return 'continue';
 }
 
 function handleWorkspace(app: SetupApp, key: KeyMsg): StepNav {

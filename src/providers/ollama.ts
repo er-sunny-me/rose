@@ -96,5 +96,38 @@ export class OllamaProvider {
             }],
         };
     }
+
+    /** Ollama native JSONL streaming. */
+    public async *stream(messages: any[], system?: string, maxTokens?: number): AsyncGenerator<any> {
+        const body = {
+            model: this.model,
+            messages: [
+                ...(system ? [{ role: 'system', content: system }] : []),
+                ...messages.map(m => ({
+                    role: m.role === 'assistant' ? 'assistant' : 'user',
+                    content: typeof m.content === 'string' ? m.content : String(m.content ?? ''),
+                })),
+            ],
+            stream: true,
+            options: maxTokens ? { num_predict: maxTokens } : undefined,
+        };
+
+        const res = await fetch(`${this.baseUrl}/api/chat`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+            signal: AbortSignal.timeout(180_000),
+        });
+        if (!res.ok || !res.body) throw new Error(`Ollama stream error ${res.status}`);
+
+        const { jsonLines } = await import('./stream.js');
+        for await (const evt of jsonLines(res.body)) {
+            const piece = evt?.message?.content;
+            if (typeof piece === 'string' && piece) yield piece;
+            if (evt?.done) break;
+        }
+        this.failures = 0;
+        this.health = 'HEALTHY';
+    }
 }
 

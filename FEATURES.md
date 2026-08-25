@@ -58,6 +58,14 @@ need instead of a hard-coded name.
 - Colored, emoji-rich terminal UI with tab-completion for all `/` commands
 - Full conversation history, session management, export
 
+### Chat TUI (`rose tui`) — Phase 36
+Full-screen chat built on the Rose TUI engine:
+- Scrollable transcript + single-line input; streaming replies when the provider supports it
+- **Live MODEL panel**: provider kind, model id, capability tier (High/Low/Local), context window (k), health dot — plus tools/vision/price chips from discovery when available
+- **LAST REPLY panel** shows the model that *actually* answered (router fallbacks are visible), wall time, token usage and API-reported cost
+- `Esc` quit-confirm, `Ctrl+C` instant safe exit, `Ctrl+L` clear, ↑↓ / mouse-wheel scroll-back
+- Graceful small-terminal guard and non-TTY guidance (`rose web` suggestion)
+
 ### Headless Server (`npm run dev -- --server`)
 - Express REST API (`src/server.ts`): sessions, messages, tasks, goals,
   diagnostics, agents, policies, simulations, incidents, reliability runs

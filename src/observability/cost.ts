@@ -1,4 +1,4 @@
-export interface CostRecord {
+﻿export interface CostRecord {
     id: string;
     targetId: string; // Task ID, Goal ID, Agent ID, etc.
     targetType: 'task' | 'goal' | 'agent' | 'model' | 'provider' | 'remote_agent';
@@ -56,4 +56,22 @@ export class CostEngine {
             percentageUsed: (spent / budget.limitAmount) * 100
         };
     }
-}
+
+    /** Phase 36: aggregated spend view for the dashboard (never raw secrets). */
+    public static getSummary(): {
+        records: CostRecord[];
+        budgets: Array<Budget & { status?: ReturnType<typeof CostEngine.getBudgetStatus> }>;
+        totalsByTargetType: Record<string, number>;
+    } {
+        const totalsByTargetType: Record<string, number> = {};
+        for (const r of this.costs) {
+            totalsByTargetType[r.targetType] = (totalsByTargetType[r.targetType] || 0) + r.costAmount;
+        }
+        return {
+            records: [...this.costs],
+            budgets: this.budgets.map(b => ({ ...b, status: this.getBudgetStatus(b.targetType, b.targetId) ?? undefined })),
+            totalsByTargetType,
+        };
+    }}
+
+

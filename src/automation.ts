@@ -1,4 +1,4 @@
-import * as cron from 'node-cron';
+﻿import * as cron from 'node-cron';
 import fs from 'fs';
 import path from 'path';
 import chalk from 'chalk';
@@ -12,8 +12,26 @@ export interface AutomationTrigger {
 }
 
 export interface AutomationAction {
-    type: 'task';
+    type: 'task' | 'handler';
     goal: string;
+}
+
+/**
+ * Phase 36: built-in service handlers automations can invoke directly
+ * (reuses the SAME node-cron scheduler — no second cron implementation).
+ */
+export class AutomationHandlers {
+    private static registry = new Map<string, () => Promise<any>>();
+
+    public static register(name: string, fn: () => Promise<any>): void {
+        this.registry.set(name, fn);
+    }
+
+    public static async run(name: string): Promise<any> {
+        const fn = this.registry.get(name);
+        if (!fn) throw new Error(`No automation handler registered for '${name}'`);
+        return fn();
+    }
 }
 
 export interface Automation {
@@ -45,7 +63,7 @@ export class AutomationEngine {
                     this.automations.set(auto.id, auto);
                 }
             } catch (e) {
-                console.warn(chalk.yellow("⚠️ Failed to parse automations.json"));
+                console.warn(chalk.yellow("âš ï¸ Failed to parse automations.json"));
             }
         }
 
@@ -92,7 +110,9 @@ export class AutomationEngine {
             // so we assume they operate in safe bounds during background execution, 
             // but the ToolExecutor will still trap any unauthorized actions.
             
-            if (auto.action.type === 'task' && this.executeTaskHook) {
+            if (auto.action.type === 'handler') {
+                await AutomationHandlers.run(auto.action.goal);
+            } else if (auto.action.type === 'task' && this.executeTaskHook) {
                 await this.executeTaskHook(auto.action.goal);
             }
             
@@ -112,6 +132,24 @@ export class AutomationEngine {
             enabled: true,
             trigger: { type: 'cron', value: cronExp },
             action: { type: 'task', goal },
+            createdAt: Date.now(),
+            updatedAt: Date.now()
+        };
+        this.automations.set(id, auto);
+        this.save();
+        this.scheduleAll();
+        return id;
+    }
+
+    /** Phase 36: register a cron automation backed by a built-in handler. */
+    public static registerHandlerAutomation(name: string, cronExp: string, handlerName: string): string {
+        const id = uuidv4();
+        const auto: Automation = {
+            id,
+            name,
+            enabled: true,
+            trigger: { type: 'cron', value: cronExp },
+            action: { type: 'handler', goal: handlerName },
             createdAt: Date.now(),
             updatedAt: Date.now()
         };
@@ -158,3 +196,4 @@ export class AutomationEngine {
         return Array.from(this.automations.values());
     }
 }
+

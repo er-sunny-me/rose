@@ -1,9 +1,9 @@
-import * as fs from 'fs';
+﻿import * as fs from 'fs';
 import * as path from 'path';
 import crypto from 'crypto';
 import { Telemetry } from '../telemetry.js';
 
-export type AggregateType = 'session' | 'task' | 'transaction' | 'automation' | 'worker' | 'approval' | 'goal' | 'world' | 'incident' | 'maintenance' | 'federation';
+export type AggregateType = 'session' | 'task' | 'transaction' | 'automation' | 'worker' | 'approval' | 'goal' | 'world' | 'incident' | 'maintenance' | 'federation' | 'extension' | 'mcp-server';
 
 export interface RuntimeEvent {
     id: string;
@@ -106,3 +106,4 @@ export class EventStore {
         return this.read();
     }
 }
+

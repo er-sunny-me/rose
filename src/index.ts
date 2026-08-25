@@ -316,6 +316,19 @@ export class GeminiLiveChat {
         });
     };
     
+    // Phase 36: memory consolidation handler + optional schedule.
+    const { AutomationHandlers } = await import('./automation.js');
+    const { MemoryConsolidation } = await import('./memory/consolidation.js');
+    AutomationHandlers.register('memory.consolidate', async () => await MemoryConsolidation.run());
+    if (process.env.ROSE_MEMORY_CONSOLIDATION_CRON) {
+        AutomationEngine.registerHandlerAutomation(
+            'Memory Consolidation',
+            process.env.ROSE_MEMORY_CONSOLIDATION_CRON,
+            'memory.consolidate'
+        );
+        console.log(chalk.gray(`Memory consolidation scheduled: ${process.env.ROSE_MEMORY_CONSOLIDATION_CRON}`));
+    }
+
     console.log(chalk.gray('Loading extensions...'));
     await ExtensionRegistry.discoverAndLoad();
   }
@@ -611,7 +624,7 @@ If no skills are needed, use an empty array. If no memory search is needed, use 
         console.log(chalk.gray('\n' + 'â”€'.repeat(60)) + '\n');
         return;
       }
-      spinner.start();
+      spinner.stop();
 
       const anthropicMessages = this.chatHistory.map(msg => ({
         role: msg.role === 'model' ? 'assistant' : 'user',
@@ -619,54 +632,37 @@ If no skills are needed, use an empty array. If no memory search is needed, use 
       }));
       anthropicMessages.push({ role: 'user', content: contextInjectedMessage });
 
-      let data: any;
+      // Phase 36: token streaming — print deltas as they arrive.
+      let replyText = '';
       try {
-          data = await ModelRouter.route(
+          process.stdout.write(chalk.green('\n🤖 AI: '));
+          for await (const chunk of ModelRouter.routeStream(
               { intent: 'generation', maxTokens: 8192 },
               anthropicMessages,
               getSystemInstruction()
-          );
-      } catch (err: any) {
-          spinner.fail('API Error');
-          console.error(chalk.red('\nâŒ Agent API Error: ' + err.message));
-          return;
-      }
-      
-      let replyText = "No text in response";
-      let thinkingText = "";
-
-      if (data.content && Array.isArray(data.content)) {
-          // Anthropic format: content is an array of parts
-          const textParts = [];
-          for (const part of data.content) {
-              if (part.type === "thinking" && part.thinking) {
-                  thinkingText = part.thinking;
-              } else if ((part.type === "text" || !part.type) && part.text) {
-                  textParts.push(part.text);
-              } else if (typeof part === 'string') {
-                  textParts.push(part);
+          )) {
+              if (chunk.type === 'text.delta' && chunk.content) {
+                  replyText += chunk.content;
+                  process.stdout.write(chalk.white(chunk.content));
+              } else if (chunk.type === 'error') {
+                  throw new Error(chunk.content || 'stream error');
               }
           }
-          if (textParts.length > 0) {
-              replyText = textParts.join("\n");
-          }
-      } else if (data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) {
-          replyText = data.choices[0].message.content; // OpenAI format
-      } else {
-          console.error("Unrecognized response format:", JSON.stringify(data, null, 2));
+          console.log();
+      } catch (err: any) {
+          console.error(chalk.red('\n❌ Agent API Error: ' + err.message));
+          if (!replyText) return;
+      }
+
+      if (!replyText) {
+          console.error(chalk.red('No response from any provider.'));
+          return;
       }
 
       this.chatHistory.push({ role: 'user', parts: [{ text: message }] });
       this.chatHistory.push({ role: 'model', parts: [{ text: replyText }] });
-
-      spinner.succeed(chalk.green('âœ… Response received'));
-      if (thinkingText) {
-          console.log(chalk.gray(`\nðŸ¤” Thinking:\n${thinkingText}\n`));
-      }
-      console.log(chalk.green('\nðŸ¤– AI: ') + chalk.white(replyText));
-      console.log(chalk.gray('\n' + 'â”€'.repeat(60)) + '\n');
+      console.log(chalk.gray('\n' + '─'.repeat(60)) + '\n');
     } catch (error: any) {
-      spinner.fail(chalk.red('âŒ Error occurred'));
       console.error(chalk.red(`Error: ${error.message}\n`));
     }
   }
@@ -841,6 +837,7 @@ If no skills are needed, use an empty array. If no memory search is needed, use 
 }
 
 export { RuntimeLifecycle };
+
 
 
 

@@ -31,12 +31,18 @@ export interface HealthRunOptions {
     onProgress?: (label: string) => void;
 }
 
-const FETCH_TIMEOUT_MS = 8000;
+const FETCH_TIMEOUT_MS = 4500;
 
 export async function runHealthChecks(opts: HealthRunOptions = {}): Promise<CheckResult[]> {
     const results: CheckResult[] = [];
     const cfg = Config.get();
     const progress = (label: string) => opts.onProgress?.(label);
+
+    // Perf fix: start the network probe IMMEDIATELY and run local checks
+    // while it is in flight — wall time ≈ max(local, probe) instead of sum.
+    const probePromise: Promise<CheckResult> | null = opts.probeProvider
+        ? probePrimaryProvider(opts.signal)
+        : null;
 
     // 1. Configuration integrity
     progress('Checking configuration...');
@@ -140,10 +146,10 @@ export async function runHealthChecks(opts: HealthRunOptions = {}): Promise<Chec
         });
     }
 
-    // 7. Live provider probe (real network, honest result)
-    if (opts.probeProvider) {
+    // 7. Live provider probe (already running in parallel — just await it)
+    if (probePromise) {
         progress('Probing provider (network)...');
-        results.push(await probePrimaryProvider(opts.signal));
+        results.push(await probePromise);
     }
 
     // 8. Tool registry (real count from the live registry)

@@ -346,6 +346,14 @@ export async function applyDraft(draft: DraftConfig): Promise<ApplyResult> {
     // Build next config on top of current values so untouched fields survive.
     const next = buildPersistedConfig(draft);
 
+    // Perf fix: the versioned setup-completion marker is embedded in the SAME
+    // atomic write instead of a second full-file write right after.
+    next.setup = {
+        version: SETUP_VERSION,
+        completedAt: next.setup?.completedAt ?? new Date().toISOString(),
+        configurationVersion: CONFIGURATION_VERSION,
+    };
+
     // Atomic write: temp file then rename (crash-safe, spec 40).
     try {
         fs.mkdirSync(globalDir, { recursive: true });
@@ -376,7 +384,6 @@ export async function applyDraft(draft: DraftConfig): Promise<ApplyResult> {
     }
 
     Config.reload();
-    markSetupComplete();
     return { ok: true, backupPath: hadExisting ? backupPath : undefined };
 }
 

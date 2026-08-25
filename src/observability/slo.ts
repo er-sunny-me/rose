@@ -1,4 +1,4 @@
-export interface SLO {
+﻿export interface SLO {
     id: string;
     name: string;
     indicator: 'availability' | 'successful_request_rate' | 'p50_latency' | 'p95_latency' | 'tool_success_rate' | 'automation_success_rate';
@@ -74,4 +74,9 @@ export class SLOSystem {
             policyState
         };
     }
-}
+
+    /** Phase 36: read access for the observability dashboard. */
+    public static getAll(): Array<SLO & { lastResult?: SLOResult }> {
+        return this.slos.map(s => ({ ...s }));
+    }}
+

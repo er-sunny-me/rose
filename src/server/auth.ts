@@ -111,8 +111,9 @@ export function authenticateRequest(req: AuthenticatedRequest, res: Response, ne
 
     const token = AuthService.extractBearer(req.headers.authorization);
     if (!token || !AuthService.verifyToken(token)) {
-        // Deliberately vague — do not leak whether the token was malformed,
-        // expired, or simply wrong.
+        // Feed the Phase 36 lockout tracker, then answer vaguely — do not
+        // leak whether the token was malformed or unknown.
+        import('./ratelimit.js').then(({ noteAuthFailure }) => noteAuthFailure(req as any));
         res.status(401).json({ error: 'Unauthorized' });
         return;
     }
