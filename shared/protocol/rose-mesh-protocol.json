@@ -1,0 +1,397 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Rose Agent Mesh Protocol",
+  "protocol": "rose-mesh",
+  "version": 1,
+  "description": "Language-neutral message contracts shared by the TypeScript server/PC agent and the Kotlin Android agent. Every envelope carries type, v (protocol version), ts (server-verified ms), nonce, and from/to agentIds assigned by the SERVER after authentication. Clients never self-assign identity.",
+  "envelope": {
+    "type": "object",
+    "required": [
+      "type",
+      "v",
+      "nonce",
+      "ts"
+    ],
+    "properties": {
+      "type": {
+        "type": "string"
+      },
+      "v": {
+        "const": 1
+      },
+      "nonce": {
+        "type": "string",
+        "description": "unique per message; replay window enforced by server"
+      },
+      "ts": {
+        "type": "integer",
+        "description": "sender ms; accepted only within CLOCK_SKEW_MS of server time"
+      },
+      "from": {
+        "type": "string",
+        "description": "agentId — stamped/verified by server"
+      },
+      "to": {
+        "type": "string",
+        "description": "target agentId or 'server'"
+      }
+    }
+  },
+  "messages": {
+    "hello": {
+      "direction": "client->server",
+      "fields": {
+        "deviceId": {
+          "type": "string"
+        },
+        "platform": {
+          "enum": [
+            "android",
+            "windows",
+            "linux",
+            "macos",
+            "docker",
+            "other"
+          ]
+        },
+        "runtimeVersion": {
+          "type": "string"
+        },
+        "protocolVersion": {
+          "type": "integer"
+        },
+        "pairToken": {
+          "type": "string",
+          "description": "only during pairing"
+        },
+        "deviceSecretHmac": {
+          "type": "string",
+          "description": "HMAC(nonce-challenge, deviceSecret) when already paired"
+        }
+      }
+    },
+    "challenge": {
+      "direction": "server->client",
+      "fields": {
+        "challenge": {
+          "type": "string"
+        }
+      }
+    },
+    "welcome": {
+      "direction": "server->client",
+      "fields": {
+        "agentId": {
+          "type": "string"
+        },
+        "trust": {
+          "enum": [
+            "trusted",
+            "restricted",
+            "pending"
+          ]
+        },
+        "serverVersion": {
+          "type": "string"
+        },
+        "meshPeers": {
+          "type": "array"
+        }
+      }
+    },
+    "agent.presence": {
+      "fields": {
+        "status": {
+          "enum": [
+            "online",
+            "busy",
+            "degraded",
+            "offline"
+          ]
+        }
+      }
+    },
+    "agent.capabilities": {
+      "fields": {
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "terminal",
+              "filesystem",
+              "browser",
+              "camera",
+              "microphone",
+              "notifications",
+              "location",
+              "clipboard",
+              "model",
+              "gpu",
+              "network",
+              "research"
+            ]
+          }
+        },
+        "resourceState": {
+          "type": "object",
+          "properties": {
+            "batteryPct": {
+              "type": "number"
+            },
+            "charging": {
+              "type": "boolean"
+            },
+            "onWifi": {
+              "type": "boolean"
+            },
+            "thermal": {
+              "enum": [
+                "none",
+                "light",
+                "moderate",
+                "severe"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "mobile.pair.request": {
+      "fields": {
+        "displayName": {
+          "type": "string"
+        }
+      },
+      "note": "sent with hello.pairToken; waits for human approval on a trusted console"
+    },
+    "mobile.pair.approved": {
+      "direction": "server->client",
+      "fields": {
+        "agentId": {
+          "type": "string"
+        },
+        "deviceSecret": {
+          "type": "string",
+          "description": "delivered exactly once over this TLS/wss connection; stored in Keystore"
+        }
+      }
+    },
+    "mobile.pair.rejected": {},
+    "agent.task.delegate": {
+      "fields": {
+        "taskId": {
+          "type": "string",
+          "description": "stable across migration; minted by delegating side"
+        },
+        "goal": {
+          "type": "string"
+        },
+        "originAgent": {
+          "type": "string"
+        },
+        "ownerAgent": {
+          "type": "string"
+        },
+        "requiredCapabilities": {
+          "type": "array"
+        },
+        "policy": {
+          "type": "object",
+          "description": "scoped permissions attached to this delegation"
+        }
+      }
+    },
+    "agent.task.progress": {
+      "fields": {
+        "taskId": {
+          "type": "string"
+        },
+        "pct": {
+          "type": "number"
+        },
+        "step": {
+          "type": "string"
+        }
+      }
+    },
+    "agent.task.result": {
+      "fields": {
+        "taskId": {
+          "type": "string"
+        },
+        "state": {
+          "enum": [
+            "completed",
+            "failed",
+            "unknown"
+          ]
+        },
+        "summary": {
+          "type": "string"
+        }
+      }
+    },
+    "agent.approval.request": {
+      "fields": {
+        "approvalId": {
+          "type": "string"
+        },
+        "command": {
+          "type": "string"
+        },
+        "workspace": {
+          "type": "string"
+        },
+        "risk": {
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "critical"
+          ]
+        }
+      }
+    },
+    "agent.approval.response": {
+      "fields": {
+        "approvalId": {
+          "type": "string"
+        },
+        "allow": {
+          "type": "boolean"
+        }
+      }
+    },
+    "agent.notification": {
+      "fields": {
+        "channel": {
+          "enum": [
+            "tasks",
+            "approvals",
+            "system",
+            "security"
+          ]
+        },
+        "title": {
+          "type": "string"
+        },
+        "body": {
+          "type": "string"
+        }
+      }
+    },
+    "agent.sync": {
+      "fields": {
+        "sinceTs": {
+          "type": "integer"
+        }
+      },
+      "note": "returns event batch since timestamp + coordination task states"
+    },
+    "heartbeat": {
+      "direction": "client->server",
+      "fields": {},
+      "note": "silent liveness refresh; server marks agent degraded when heartbeats stop"
+    },
+    "memory.share": {
+      "fields": {
+        "memoryId": {
+          "type": "string"
+        },
+        "scope": {
+          "enum": [
+            "shared-project",
+            "shared-task",
+            "shared-goal"
+          ]
+        },
+        "title": {
+          "type": "string"
+        },
+        "content": {
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        },
+        "tags": {
+          "type": "array"
+        },
+        "version": {
+          "type": "integer",
+          "note": "monotonic per memoryId; CONFLICT on <= current"
+        }
+      },
+      "vector": {
+        "type": "array",
+        "description": "optional, computed by the SENDING agent via its EmbeddingProvider — the server never calls embedding APIs"
+      }
+    },
+    "memory.share.result": {
+      "fields": {
+        "ok": {
+          "type": "boolean"
+        },
+        "reason": {
+          "enum": [
+            "CONFLICT",
+            "PRIVATE_SCOPE",
+            "INVALID"
+          ],
+          "required": false
+        },
+        "currentVersion": {
+          "type": "integer",
+          "required": false
+        }
+      }
+    },
+    "memory.query": {
+      "fields": {
+        "q": {
+          "type": "string",
+          "required": false
+        },
+        "project": {
+          "type": "string",
+          "required": false
+        },
+        "vector": {
+          "type": "array",
+          "required": false
+        },
+        "limit": {
+          "type": "integer",
+          "required": false
+        }
+      }
+    },
+    "memory.query.result": {
+      "fields": {
+        "results": {
+          "type": "array"
+        }
+      }
+    },
+    "agent.sync.batch": {
+      "direction": "server->client",
+      "fields": {
+        "events": {
+          "type": "array"
+        },
+        "tasks": {
+          "type": "array"
+        },
+        "serverTime": {
+          "type": "integer"
+        }
+      }
+    }
+  },
+  "limits": {
+    "CLOCK_SKEW_MS": 30000,
+    "NONCE_CACHE_SIZE": 4096,
+    "PAIRING_CODE_TTL_MS": 300000,
+    "MAX_MESSAGE_BYTES": 262144
+  }
+}

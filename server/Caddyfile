@@ -1,0 +1,14 @@
+# Auto-HTTPS edge for the Rose Agent Server (optional profile).
+# Usage: DOMAIN=mesh.example.com ACME_EMAIL=you@example.com docker compose --profile tls up -d
+
+{$DOMAIN} {
+	encode zstd gzip
+
+	# WebSocket upgrade for /mesh/ws and /ws passes through automatically.
+	reverse_proxy rose:3000
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options nosniff
+	}
+}

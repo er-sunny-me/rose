@@ -43,6 +43,8 @@ import { Config } from './config.js';
 dotenv.config();
 
 function startProxyBackground() {
+    if (process.env.ROSE_HEADLESS === '1') return; // cloud mesh server: no local proxy
+
     try {
         const proxy = spawn(process.platform === 'win32' ? 'npx.cmd' : 'npx', ['--yes', 'antigravity-proxy-ai'], {
             detached: true,
@@ -104,17 +106,18 @@ process.on('SIGINT', async () => {
     await RuntimeLifecycle.shutdown();
 });
 
-// API keys are now validated per-provider inside the ModelRouter.
-// No single key is required at boot â€” the router will throw clear errors if a key is missing.
-const cfg = Config.get();
-const hasAnyKey = cfg.keys?.gemini || cfg.keys?.anthropic || cfg.keys?.openai || cfg.keys?.openrouter
-    || cfg.agent?.provider === 'proxy' || cfg.agent?.provider === 'openrouter' || cfg.agent?.provider === 'ollama';
-
-if (!hasAnyKey) {
-  console.error(chalk.red('\nâŒ Error: No API keys or proxy configured.'));
-  console.log(chalk.yellow('Run the setup wizard to configure your agent:'));
-  console.log(chalk.bold.cyan('  rose setup'));
-  process.exit(1);
+/** Chat/voice surfaces need a provider; the headless mesh server does NOT.
+ * Cloud deployments call this only where AI is actually used (Phase 37 §3). */
+export function requireProviderConfigured(): void {
+  const c = Config.get();
+  const hasAnyKey = c.keys?.gemini || c.keys?.anthropic || c.keys?.openai || c.keys?.openrouter
+      || c.agent?.provider === 'proxy' || c.agent?.provider === 'ollama';
+  if (!hasAnyKey) {
+    console.error(chalk.red('\nError: No API keys or proxy configured.'));
+    console.log(chalk.yellow('Run the setup wizard to configure your agent:'));
+    console.log(chalk.bold.cyan('  rose setup'));
+    process.exit(1);
+  }
 }
 
 
@@ -149,7 +152,7 @@ export class GeminiLiveChat {
 
   constructor() {
     this.activeSession = SessionManager.createSession(this.currentSession);
-    this.genAI = new GoogleGenerativeAI(cfg.keys?.gemini || '');
+    this.genAI = new GoogleGenerativeAI(Config.get().keys?.gemini || '');
     this.voice = new LiveSessionController({
       getChatHistory: () => this.chatHistory,
       setChatHistory: (messages) => { this.chatHistory = messages; },

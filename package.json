@@ -1,7 +1,7 @@
 {
     "name": "rose-ai",
-    "version": "1.1.5",
-    "description": "General-purpose local-first AI agent platform with tools, memory, automation, research, multi-agent orchestration and Gemini Live.",
+    "version": "1.1.10",
+    "description": "Rose: The Advanced Agentic Coding Assistant, platform with tools, memory, automation, research, multi-agent orchestration and Gemini Live.",
     "main": "dist/index.js",
     "bin": {
         "rose": "dist/cli.js"
@@ -54,6 +54,7 @@
         "@inquirer/prompts": "^8.6.0",
         "@modelcontextprotocol/sdk": "^1.30.0",
         "@octokit/rest": "^22.0.1",
+        "@opentui/core": "^0.5.8",
         "antigravity-proxy-ai": "*",
         "better-sqlite3": "^13.0.3",
         "chalk": "^5.3.0",
@@ -65,6 +66,7 @@
         "node-cron": "^4.6.0",
         "ora": "^8.0.1",
         "playwright": "^1.62.1",
+        "qrcode-terminal": "^0.12.0",
         "screenshot-desktop": "^1.15.6",
         "sqlite-vec": "^0.1.9",
         "uuid": "^14.0.2",
@@ -77,6 +79,7 @@
         "@types/express": "^5.0.6",
         "@types/node": "^22.5.0",
         "@types/node-cron": "^3.0.11",
+        "@types/qrcode-terminal": "^0.12.2",
         "@types/screenshot-desktop": "^1.15.0",
         "@types/uuid": "^10.0.0",
         "@types/ws": "^8.5.12",

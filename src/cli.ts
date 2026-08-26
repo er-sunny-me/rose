@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { RuntimeLifecycle, GeminiLiveChat } from './index.js';
+import { RuntimeLifecycle, GeminiLiveChat, requireProviderConfigured } from './index.js';
 import { AgentServer } from './server.js';
 import { Config } from './config.js';
 import chalk from 'chalk';
@@ -9,6 +9,7 @@ import { Supervisor } from './agents.js';
 import { GoalManager } from './goals/manager.js';
 import { TaskRouter } from './tasks.js';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -29,6 +30,19 @@ import { LearningStore } from './learning.js';
 import fsSync from 'fs';
 
 function PACKAGE_NAME_LABEL(): string { return 'rose-ai'; }
+
+function savedServerFromFile(): string {
+    try { return fsSync.readFileSync(path.join(Config.getGlobalDir(), 'mesh-server.txt'), 'utf8').trim(); } catch { return ''; }
+}
+
+/** Phase 37: mesh REST base — ROSE_SERVER env > ~/.rose/mesh-server.txt > local AgentServer. */
+function resolveMeshBase(): string {
+    const envServer = process.env.ROSE_SERVER;
+    let saved = '';
+    try { saved = fsSync.readFileSync(path.join(Config.getGlobalDir(), 'mesh-server.txt'), 'utf8').trim(); } catch { /* none */ }
+    const target = envServer || saved || ('http://127.0.0.1:' + (Config.get().server.port || 3000));
+    return target.replace(/\/$/, '') + '/api/v1';
+}
 
 const args = process.argv.slice(2);
 const command = args[0] || '';
@@ -69,7 +83,8 @@ function printHelp() {
     console.log('  doctor      Run system diagnostics and health checks');
     console.log('  setup       Open the Rose configuration experience (TUI)');
     console.log('  config      Manage configuration (bare `rose config` opens settings)');
-    console.log('  update      Check for and apply updates to Rose');
+    console.log('  agents      Agent Mesh: list/pair/connect/approve/inspect/revoke/task');
+  console.log('  update      Check for and apply updates to Rose');
     console.log(chalk.gray('  update --check / --dry-run'));
     console.log('  auth        Manage OS-stored credentials (status|set|remove)');
     console.log('  extensions  Verify/trust/revoke signed extensions');
@@ -205,6 +220,7 @@ async function runInteractivePrompt() {
 
 /** Phase 36: `rose tui` — full-screen chat TUI (replaces the old readline `rose chat`). */
 async function startTuiChat() {
+    requireProviderConfigured();
     if (!isQuiet) console.log(chalk.cyan('Starting Rose TUI...'));
     await RuntimeLifecycle.boot();
     const { ChatTui } = await import('./tui/chatApp.js');
@@ -216,10 +232,17 @@ async function startTuiChat() {
         console.log(chalk.yellow('\nRose TUI needs an interactive terminal.'));
         console.log(chalk.gray('Non-interactive shells can use the Web Control Panel: ') + chalk.bold.cyan('rose web'));
         process.exitCode = 1;
+        return;
+    }
+    // `/voice` inside the TUI hands over to the voice-to-voice app directly.
+    if ((chat as any).voiceRequested) {
+        if (!isQuiet) console.log(chalk.cyan('Launching voice mode...\n'));
+        await startVoice();
     }
 }
 
 async function startVoice() {
+    requireProviderConfigured();
     if (!isQuiet) console.log(chalk.cyan('Starting Rose Voice...'));
     await RuntimeLifecycle.boot();
     const chat = new GeminiLiveChat();
@@ -286,6 +309,123 @@ async function openSettingsDashboard(): Promise<void> {
     } catch (err: any) {
         if (!String(err.message).includes('NON_INTERACTIVE')) throw err;
         printNonInteractiveSetupGuidance();
+    }
+}
+
+/** Phase 37 — `rose agents` subcommands against the local Agent Server. */
+async function runAgentsCommand(rest: string[]) {
+    const sub = rest[0] || 'list';
+    const base = resolveMeshBase();
+
+    const api = async (path: string, init?: RequestInit) => {
+        const res = await fetch(`${base}${path}`, { ...init, headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) } });
+        const body = await res.json().catch(() => ({}));
+        return { status: res.status, body } as { status: number; body: any };
+    };
+
+    switch (sub) {
+        case 'connect': {
+            // Run THIS PC as a mesh agent: pairing + live delegation receiver.
+            const serverUrl = process.env.ROSE_SERVER || rest[1] || savedServerFromFile();
+            if (!serverUrl) {
+                console.error(chalk.red('Usage: rose agents connect <server-url>   e.g. http://192.168.1.5:3000'));
+                process.exitCode = 1;
+                break;
+            }
+            try {
+                fsSync.mkdirSync(path.join(Config.getGlobalDir(), '.'), { recursive: true });
+            } catch { /* exists */ }
+            fsSync.writeFileSync(path.join(Config.getGlobalDir(), 'mesh-server.txt'), serverUrl);
+
+            await RuntimeLifecycle.boot();
+            const { PcMeshAgent } = await import('./mesh-client.js');
+            const agent = new PcMeshAgent({
+                serverUrl,
+                displayName: 'PC · ' + (os.hostname?.() ?? 'this machine'),
+                capabilities: ['terminal', 'filesystem', 'browser'],
+                executeGoal: async (goal) => {
+                    // Execute with the REAL local agent core: planner → tools → verification.
+                    const { SessionManager } = await import('./session.js');
+                    const session = SessionManager.createSession('mesh-' + Date.now());
+                    return await session.taskExecutor.executeTask(goal, goal);
+                },
+            });
+            console.log(chalk.bold.cyan('\n🔗 Connecting this PC to the Agent Mesh…'));
+            await agent.connect();
+            // Keep the process alive while the socket runs.
+            await new Promise(() => {}); // connector handles Ctrl+C via SIGINT default? ensure below
+            break;
+        }
+        case 'pair': {
+            const r = await api('/agents/pair', { method: 'POST' });
+            if (r.status !== 200) { console.error(chalk.red('✗ Server unreachable — start it with `rose web` first.')); process.exitCode = 1; return; }
+            console.log(chalk.bold.magenta('\n🤝 Pair a new Agent\n'));
+            console.log(`  Pairing Code : ${chalk.bold.cyan(r.body.code)}`);
+            console.log(`  Expires      : ${new Date(r.body.expiresAt).toLocaleTimeString()}`);
+            console.log(chalk.gray('\n  QR payload (mobile app scan):'));
+            console.log(chalk.gray(`  ${r.body.qr}`));
+            console.log(chalk.yellow(`\n  Approve with: rose agents approve ${r.body.code}`));
+            console.log(chalk.gray('  The token is single-use and expires automatically.\n'));
+            return;
+        }
+        case 'approve': {
+            const code = rest[1];
+            if (!code) { console.error(chalk.red('Usage: rose agents approve <code>')); process.exitCode = 1; return; }
+            const r = await api('/agents/pair/approve', { method: 'POST', body: JSON.stringify({ code }) });
+            if (r.status !== 200) { console.error(chalk.red('✗ ' + (r.body.error || 'approval failed'))); process.exitCode = 1; return; }
+            console.log(chalk.green(`✓ Approved ${code}. Waiting for the device to finish pairing…`));
+            return;
+        }
+        case 'inspect': {
+            const id = rest[1];
+            if (!id) { console.error(chalk.red('Usage: rose agents inspect <agentId>')); process.exitCode = 1; return; }
+            const r = await api(`/agents/${encodeURIComponent(id)}`);
+            if (r.status !== 200) { console.error(chalk.red('✗ not found')); process.exitCode = 1; return; }
+            const a = r.body;
+            console.log(chalk.bold.cyan(`\n🔍 ${a.displayName} (${a.agentId})`));
+            console.log(`  Platform : ${a.platform}`);
+            console.log(`  Status   : ${a.status}   Trust: ${a.trust}`);
+            console.log(`  Caps     : ${a.capabilities.join(', ') || '(none)'}`);
+            console.log(`  Last seen: ${a.lastSeen ? new Date(a.lastSeen).toLocaleString() : 'never'}\n`);
+            return;
+        }
+        case 'revoke': {
+            const id = rest[1];
+            if (!id) { console.error(chalk.red('Usage: rose agents revoke <agentId>')); process.exitCode = 1; return; }
+            const r = await api(`/agents/${encodeURIComponent(id)}/revoke`, { method: 'POST' });
+            if (r.status !== 200) { console.error(chalk.red('✗ ' + (r.body.error || 'revoke failed'))); process.exitCode = 1; return; }
+            console.log(chalk.green(`✓ Revoked ${id}. The device must pair again.`));
+            return;
+        }
+        case 'health': {
+            const id = rest[1];
+            const path2 = id ? `/agents/${encodeURIComponent(id)}/health` : '/mesh';
+            const r = await api(path2);
+            console.log(JSON.stringify(r.body, null, 2));
+            return;
+        }
+        case 'task': {
+            const id = rest[1];
+            const goal = rest.slice(2).join(' ');
+            if (!id || !goal) { console.error(chalk.red('Usage: rose agents task <agentId> <goal…>')); process.exitCode = 1; return; }
+            const r = await api(`/agents/${encodeURIComponent(id)}/tasks`, { method: 'POST', body: JSON.stringify({ goal }) });
+            if (r.status !== 200) { console.error(chalk.red('✗ ' + (r.body.error || 'delegation failed'))); process.exitCode = 1; return; }
+            console.log(chalk.green(`✓ Delegated task ${r.body.taskId} → ${id}`));
+            return;
+        }
+        default: {
+            const r = await api('/mesh');
+            if (r.status !== 200) { console.error(chalk.red('✗ Server unreachable — start it with `rose web` first.')); process.exitCode = 1; return; }
+            const m = r.body;
+            console.log(chalk.bold.magenta('\n🌐 Agent Mesh\n'));
+            console.log(`  Agents: ${m.total} total · ${chalk.green(m.online + ' online')} · ${chalk.yellow(m.degraded + ' degraded')} · ${m.offline} offline`);
+            for (const a of m.agents) {
+                const dot = a.status === 'online' ? chalk.green('●') : a.status === 'degraded' ? chalk.yellow('⚠') : chalk.gray('○');
+                console.log(`  ${dot} ${a.displayName.padEnd(24)} ${a.platform.padEnd(10)} ${a.trust.padEnd(9)} ${a.agentId}`);
+            }
+            console.log(chalk.gray('\n  pair / approve / inspect / revoke / health / task — see rose agents --help\n'));
+            return;
+        }
     }
 }
 
@@ -435,6 +575,11 @@ async function main() {
                     console.error(chalk.gray('Check your internet connection / registry availability.'));
                     process.exitCode = 1;
                 }
+                break;
+            }
+            case 'agents': {
+                // Phase 37: Agent Mesh management (talks to the local Agent Server).
+                await runAgentsCommand(args.slice(1));
                 break;
             }
             case 'auth': {

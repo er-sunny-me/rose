@@ -2,6 +2,7 @@ import { spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
+import { Config } from '../config.js';
 
 // ─────────────────────────────────────────────────────────────
 // Layered command execution pipeline:
@@ -119,11 +120,29 @@ const DENYLIST_PATTERNS: Array<{ id: string; pattern: RegExp; why: string }> = [
 const SHELL_OPERATORS = ['&&', '||', '|&', '|', '>', '>>', '<', '&', ';'];
 
 function getExtraAllow(): Set<string> {
-    const extra = (process.env.ROSE_SANDBOX_EXTRA_ALLOWLIST || '')
-        .split(',')
-        .map(s => s.trim().toLowerCase())
-        .filter(Boolean);
-    return new Set(extra);
+    const parts = [
+        ...(process.env.ROSE_SANDBOX_EXTRA_ALLOWLIST || '').split(','),
+        ...((Config.get().security as any)?.sandboxAllowlist || []),
+    ];
+    return new Set(parts.map(s => String(s).trim().toLowerCase()).filter(Boolean));
+}
+
+/**
+ * URL-opening commands ("start https://…", macOS `open`, Linux `xdg-open`)
+ * are allowed WITHOUT full allowlist membership — but ONLY when every
+ * argument is a plain http(s) URL. `start notepad.exe` still requires
+ * approval like any other unlisted executable.
+ */
+function isUrlOpenOnly(executableBase: string, args: string[]): boolean {
+    const openers = process.platform === 'win32'
+        ? ['start']
+        : process.platform === 'darwin'
+            ? ['open']
+            : ['xdg-open'];
+    if (!openers.includes(executableBase)) return false;
+    // Skip the optional window-title placeholder: start "" https://…
+    const rest = args.filter(a => a !== '""' && a !== "''");
+    return rest.length > 0 && rest.every(a => /^https?:\/\//i.test(a));
 }
 
 /** Quote-aware tokenizer (double + single quotes, Windows carets ignored). */
@@ -321,9 +340,15 @@ export function evaluateCommand(rawCommand: string, options: SandboxOptions = {}
         return finalize('DENY', 'denied', `shell operators not permitted (${operators.join(', ')})`, parsed);
     }
 
-    // Layer 3: allowlist
+    // Layer 3: allowlist (plus the narrow URL-opener exception)
     const allow = new Set([...BASE_ALLOWLIST, ...getExtraAllow()]);
     if (!allow.has(executableBase)) {
+        // Opening an http(s) URL in the user's browser is a narrow, auditable
+        // action — allowed even though `start`/`open` themselves are not on
+        // the general allowlist.
+        if (isUrlOpenOnly(executableBase, parsed.args)) {
+            return finalize('ALLOW', 'safe', 'opens an http(s) URL in the system browser', parsed);
+        }
         if (!isBuiltin) {
             return finalize(
                 executableBase === 'sudo' || executableBase === 'runas'

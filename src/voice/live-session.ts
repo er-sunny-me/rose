@@ -8,11 +8,47 @@ import { AudioPlayer, MicRecorder, detectTools, listInputDevices, pcmToWav, INPU
 import type { AudioTools } from '../audio.js';
 import { ToolRegistry, ToolExecutor } from '../tools.js';
 import { getSystemInstruction } from '../context.js';
+import { Config } from '../config.js';
 
+/** Voice preference: persisted config wins, env var is the fallback. */
+function voicePref<T>(configValue: T | undefined, envVar: string, fallback: T): T {
+    if (configValue !== undefined && configValue !== null && (configValue as any) !== '') return configValue;
+    const ev = process.env[envVar];
+    if (ev !== undefined && ev !== '') {
+        if (typeof fallback === 'boolean') return (ev === 'true') as unknown as T;
+        if (typeof fallback === 'number') { const n = parseInt(ev, 10); if (Number.isFinite(n)) return n as unknown as T; }
+        return ev as unknown as T;
+    }
+    return fallback;
+}
+
+type VoiceCfgShape = NonNullable<ReturnType<typeof Config.get>['voice']>;
+function voiceCfg(): Partial<VoiceCfgShape> {
+    return Config.get().voice ?? {};
+}
+
+export function resolveModelLive(): string {
+  const v = voiceCfg() as any;
+  return v.modelLive || process.env.MODEL_LIVE || 'models/gemini-3.1-flash-live-preview';
+}
 export const MODEL_LIVE = process.env.MODEL_LIVE || 'models/gemini-3.1-flash-live-preview';
 export const MODEL_TEXT = process.env.MODEL_TEXT || 'gemini-2.0-flash-lite';
 
-const LIVE_API_URL = `wss://generativelanguage.googleapis.com/ws/v1alpha/internal?key=${process.env.GEMINI_API_KEY}`;
+/**
+ * Live API endpoints, tried in order. The old hardcoded /ws/v1alpha/internal
+ * path started returning 404 ("Unexpected server response: 404") while the
+ * model itself is fine — Google's public BidiGenerateContent route lives at
+ * /ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent,
+ * so that is tried FIRST and the legacy route kept as fallback.
+ */
+function liveApiUrls(): string[] {
+  const key = process.env.GEMINI_API_KEY || '';
+  const enc = encodeURIComponent(key);
+  return [
+    `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${enc}`,
+    `wss://generativelanguage.googleapis.com/ws/v1alpha/internal?key=${enc}`,
+  ];
+}
 
 export const VOICE_NAMES = ['Puck', 'Charon', 'Kore', 'Fenrir', 'Aoede'];
 
@@ -66,7 +102,7 @@ export class LiveSessionController {
   private recording = false;
   private screenInterval: NodeJS.Timeout | null = null;
 
-  private currentVoice = process.env.VOICE_NAME || 'Puck';
+  private currentVoice = voicePref<string>((voiceCfg() as any).voiceName, 'VOICE_NAME', 'Puck');
 
   /** Current coarse-grained audio state. */
   private state: VoiceState = VoiceState.IDLE;
@@ -131,7 +167,7 @@ export class LiveSessionController {
     if (this.tools.ffmpeg) {
       this.micDevices = await listInputDevices();
       if (this.micDevices.length > 0) {
-        const defaultMic = process.env.DEFAULT_MIC;
+        const defaultMic = voicePref<string>((voiceCfg() as any).defaultMic, 'DEFAULT_MIC', '');
         const matched = defaultMic ? this.micDevices.find((d) => d.toLowerCase().includes(defaultMic.toLowerCase())) : null;
         this.micDevice = matched || this.micDevices[0];
       }
@@ -187,10 +223,40 @@ export class LiveSessionController {
 
   // ----- Connection -----
 
+  /**
+   * Live API is STRICT about tool schemas (closes with 1007 where REST was
+   * tolerant): declaration-level extras like our internal `sideEffect` flag
+   * are rejected, and any `required` entry missing from `properties` kills
+   * the whole setup. Sanitize both while leaving valid schemas untouched.
+   */
+  private static sanitizeToolDeclarations(decls: any[]): any[] {
+    const cleanNode = (node: any): any => {
+      if (Array.isArray(node)) return node.map(cleanNode);
+      if (node && typeof node === 'object') {
+        const out: any = {};
+        for (const [k, v] of Object.entries(node)) {
+          if (k === 'required' && Array.isArray(v)) {
+            const props = (node.properties ?? {}) as Record<string, unknown>;
+            out[k] = v.filter((r: string) => r in props);
+            continue;
+          }
+          out[k] = cleanNode(v);
+        }
+        return out;
+      }
+      return node;
+    };
+
+    return decls.map((d: any) => {
+      const { sideEffect, ...rest } = d;
+      return rest.parameters ? { ...rest, parameters: cleanNode(rest.parameters) } : rest;
+    });
+  }
+
   private buildSetupMessage(): object {
     return {
       setup: {
-        model: MODEL_LIVE,
+        model: resolveModelLive(),
         generationConfig: {
           responseModalities: [this.host.isVoiceMode() ? 'AUDIO' : 'TEXT'],
           speechConfig: {
@@ -212,7 +278,7 @@ export class LiveSessionController {
         },
         tools: [
           {
-            functionDeclarations: ToolRegistry.getDeclarations(),
+            functionDeclarations: LiveSessionController.sanitizeToolDeclarations(ToolRegistry.getDeclarations()),
           },
         ],
         realtimeInputConfig: {
@@ -234,6 +300,21 @@ export class LiveSessionController {
       return true;
     }
 
+    // Try each known endpoint route until one completes the setup handshake.
+    const urls = liveApiUrls();
+    for (let i = 0; i < urls.length; i++) {
+      const isLast = i === urls.length - 1;
+      const ok = await this.attemptConnection(urls[i], !isLast);
+      if (ok) return true;
+      if (!isLast) {
+        console.log(chalk.gray('   ↳ Trying alternate Live API endpoint…'));
+      }
+    }
+    return false;
+  }
+
+  /** Open ONE socket against `url`; resolves true only after setupComplete. */
+  private attemptConnection(url: string, silentFail: boolean): Promise<boolean> {
     const spinner = ora({ text: chalk.cyan('🔌 Connecting to Gemini Flash Live API...'), discardStdin: false }).start();
 
     return new Promise((resolve) => {
@@ -246,7 +327,7 @@ export class LiveSessionController {
       };
 
       try {
-        this.ws = new WebSocket(LIVE_API_URL);
+        this.ws = new WebSocket(url);
 
         this.ws.on('open', () => {
           spinner.text = chalk.cyan('Sending setup configuration...');
@@ -267,19 +348,39 @@ export class LiveSessionController {
         });
 
         this.ws.on('error', (error) => {
-          spinner.fail(chalk.red('❌ Connection error'));
-          console.error(chalk.red('WebSocket error:'), error.message);
+          if (silentFail) {
+            spinner.stop(); // next route will speak up
+          } else {
+            spinner.fail(chalk.red('❌ Connection error'));
+            console.error(chalk.red('WebSocket error:'), error.message);
+          }
           this.connected = false;
           this.setState(VoiceState.ERROR);
           done(false);
         });
 
         this.ws.on('close', (code, reason) => {
-          spinner.stop();
-          const detail = reason?.toString().trim();
-          console.log(
-            chalk.yellow(`\n🔌 Disconnected from Live API (code ${code}${detail ? `: ${detail}` : ''})`)
-          );
+          if (!silentFail && !this.connected) {
+            spinner.stop();
+            const detail = reason?.toString().trim();
+            console.log(
+              chalk.yellow(`\n🔌 Disconnected from Live API (code ${code}${detail ? `: ${detail}` : ''})`)
+            );
+          } else {
+            spinner.stop();
+          }
+          if (settled) {
+            // Post-setup drop: surface it like before.
+            if (this.connected) {
+              console.log(chalk.yellow('\n🔌 Live session ended.'));
+              this.connected = false;
+              this.stopRecording(true);
+              this.player.stop();
+              this.setState(VoiceState.IDLE);
+            }
+            done(false);
+            return;
+          }
           this.connected = false;
           this.ws = null;
           this.stopRecording(true);
@@ -288,8 +389,10 @@ export class LiveSessionController {
           done(false);
         });
       } catch (error: any) {
-        spinner.fail(chalk.red('❌ Failed to connect'));
-        console.error(chalk.red('Error:'), error.message);
+        if (!silentFail) {
+          spinner.fail(chalk.red('❌ Failed to connect'));
+          console.error(chalk.red('Error:'), error.message);
+        }
         done(false);
       }
     });
@@ -495,8 +598,8 @@ export class LiveSessionController {
     this.recording = true;
     this.userTranscript = '';
 
-    if (process.env.ENABLE_SCREEN_SHARE === 'true') {
-      const intervalMs = parseInt(process.env.SCREEN_CAPTURE_INTERVAL_MS || '2000', 10);
+    if (voicePref<boolean>((voiceCfg() as any).screenShare, 'ENABLE_SCREEN_SHARE', false)) {
+      const intervalMs = voicePref<number>((voiceCfg() as any).screenIntervalMs, 'SCREEN_CAPTURE_INTERVAL_MS', 2000);
       this.screenInterval = setInterval(() => void this.sendScreenCapture(), intervalMs);
       console.log(chalk.cyan('🖥️  Screen Sharing is ON. AI can see your screen.'));
     }

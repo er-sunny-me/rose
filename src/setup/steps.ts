@@ -19,7 +19,7 @@ import {
     SetupApp, StepId, MANAGER_SECTIONS, shortenHome,
 } from './app.js';
 import {
-    DraftConfig, defaultModelFor, envCredentialDetected, detectProject,
+    DraftConfig, VOICE_NAME_OPTIONS, defaultModelFor, envCredentialDetected, detectProject,
     resolveWorkspacePath, maskSecret, diffAgainstCurrent, configFileExists,
     type FieldKey,
 } from './configService.js';
@@ -83,6 +83,7 @@ export function renderStepContent(
         case 'provider': return renderProvider(app, inner);
         case 'workspace': return renderWorkspace(app, inner);
         case 'memory': return renderMemory(app, inner);
+        case 'voice': return renderVoice(app, inner);
         case 'security': return renderSecurity(app, inner);
         case 'appearance': return renderAppearance(app, inner);
         case 'web': return renderWeb(app, inner);
@@ -382,13 +383,14 @@ async function runProviderTest(app: SetupApp): Promise<void> {
     } finally {
         app.stopSpinner();
         app.testRunning = false;
+        app.drawFrame(); // paint result immediately (bugfix: needed a keypress before)
     }
 }
 
 function statusFromCheck(t: Theme, c: CheckResult, w: number): string {
     const state: HealthState = c.state === 'pass' ? 'pass' : c.state === 'warn' ? 'warn' : c.state === 'fail' ? 'fail' : 'idle';
     const detail = c.detail.length > Math.max(10, w - 30) ? c.detail.slice(0, Math.max(10, w - 33)) + '…' : c.detail;
-    return '  ' + statusRow(t, c.label, state, detail, 14);
+    return '  ' + statusRow(t, c.label, state, detail, 22);
 }
 
 /** Labeled input line pair with hit registration on the field row. */
@@ -531,6 +533,221 @@ function renderMemory(app: SetupApp, w: number): Fragment {
     return { lines, rowHits: hits };
 }
 
+// ═══ VOICE (Gemini Live) ══════════════════════════════════
+
+/**
+ * Voice setup screen: voice personality, microphone, screen-share.
+ * Flat-cursor navigation like AI Provider; mic list is detected lazily.
+ */
+type VoiceRow =
+    | { kind: 'voice'; id: string }
+    | { kind: 'mic'; id: string }        // '' = auto
+    | { kind: 'screenshare'; value: boolean }
+    | { kind: 'interval' }
+    | { kind: 'action'; btn: 0 };
+
+async function ensureMics(app: SetupApp): Promise<void> {
+    if (st<boolean>(app, 'voice.micsFetched', false)) return;
+    stSet(app, 'voice.micsFetched', true);
+    try {
+        const { detectTools, listInputDevices } = await import('../audio.js');
+        const tools = await detectTools();
+        if (tools.ffmpeg) {
+            const devices = await listInputDevices();
+            stSet(app, 'voice.mics', devices);
+        } else {
+            stSet(app, 'voice.mics', []);
+            stSet(app, 'voice.micsError', 'ffmpeg not found on PATH');
+        }
+    } catch (e: any) {
+        stSet(app, 'voice.mics', []);
+        stSet(app, 'voice.micsError', e.message ?? String(e));
+    }
+}
+
+function renderVoice(app: SetupApp, w: number): Fragment {
+    const t = app.theme;
+    const d = app.draft;
+    const lines: string[] = [];
+    const hits = new Map<number, () => void>();
+
+    void ensureMics(app);
+    const mics = st<string[] | null>(app, 'voice.mics', null);
+
+    // Row model
+    const rowModel: Array<
+        | { kind: 'voice'; id: string }
+        | { kind: 'mic'; id: string }
+        | { kind: 'screenshare'; value: boolean }
+        | { kind: 'interval' }
+        | { kind: 'action'; btn: 0 }
+    > = [];
+    for (const v of VOICE_NAME_OPTIONS) rowModel.push({ kind: 'voice', id: v });
+    rowModel.push({ kind: 'mic', id: '' }); // Auto
+    for (const m of mics ?? []) rowModel.push({ kind: 'mic', id: m });
+    rowModel.push({ kind: 'screenshare', value: true });
+    rowModel.push({ kind: 'screenshare', value: false });
+    rowModel.push({ kind: 'interval' });
+    rowModel.push({ kind: 'action', btn: 0 });
+    app.providerRows = rowModel as typeof app.providerRows;
+
+    if (!st<boolean>(app, 'voice.cursorInit', false)) {
+        stSet(app, 'voice.cursorInit', true);
+        app.prCursor = Math.max(0, rowModel.findIndex(r => r.kind === 'voice' && r.id === d.voiceName));
+    }
+    let cursor = Math.max(0, Math.min(st<number>(app, 'voice.cursor', 0), rowModel.length - 1));
+    stSet(app, 'voice.cursor', cursor);
+    // Reuse prCursor so shared key-handler helpers stay coherent.
+    app.prCursor = cursor;
+
+    lines.push(heading(t, 'Voice'));
+    lines.push('');
+    lines.push(t.palette.dim('Gemini Live voice-to-voice · applies after save'));
+
+    // ── Voice personality ──
+    lines.push('');
+    lines.push(heading(t, 'Voice Personality'));
+    lines.push('');
+    rowModel.forEach((r, i) => {
+        if (r.kind !== 'voice') return;
+        const selected = d.voiceName === r.id;
+        const focused = i === cursor;
+        const icon = focused ? t.icons.selected : selected ? t.icons.radioOn : t.icons.radioOff;
+        const painter = focused ? ((x: string) => t.palette.accentBold(x)) : selected ? ((x: string) => t.palette.accent(x)) : ((x: string) => t.palette.text(x));
+        lines.push(painter(`${icon} ${r.id}`));
+        hits.set(lines.length - 1, () => { d.voiceName = r.id; app.markDirty(); app.prCursor = i; });
+    });
+
+    // ── Microphone ──
+    lines.push('');
+    lines.push(heading(t, 'Microphone'));
+    lines.push('');
+    if (mics === null) {
+        lines.push(t.palette.dim('Detecting microphones…'));
+    } else if (mics.length === 0) {
+        const err = st<string>(app, 'voice.micsError', '');
+        lines.push(t.palette.warn(`${t.icons.warn} ${err || 'No input devices detected'} — install FFmpeg to enable mic capture.`));
+    } else {
+        rowModel.forEach((r, i) => {
+            if (r.kind !== 'mic') return;
+            const label = r.id === '' ? 'Auto (first detected)' : r.id;
+            const selected = (d.defaultMic || '') === r.id ||
+                (!d.defaultMic && r.id === '') ||
+                (r.id !== '' && d.defaultMic && r.id.toLowerCase().includes(d.defaultMic.toLowerCase()));
+            const focused = i === cursor;
+            const icon = focused ? t.icons.selected : selected ? t.icons.radioOn : t.icons.radioOff;
+            const painter = focused ? ((x: string) => t.palette.accentBold(x)) : ((x: string) => t.palette.text(x));
+            lines.push(painter(`${icon} ${truncateStr(label, Math.max(12, w - 8))}`));
+            hits.set(lines.length - 1, () => {
+                d.defaultMic = r.id; // '' = auto
+                app.markDirty(); app.prCursor = i;
+            });
+        });
+    }
+
+    // ── Screen share ──
+    lines.push('');
+    lines.push(heading(t, 'Screen Share'));
+    lines.push(t.palette.dim('Lets the model see your screen while talking.'));
+    lines.push('');
+    for (const val of [true, false]) {
+        const i = rowModel.findIndex(r2 => r2.kind === 'screenshare' && r2.value === val);
+        const selected = d.screenShare === val;
+        const focused = i === cursor;
+        const icon = focused ? t.icons.selected : selected ? t.icons.radioOn : t.icons.radioOff;
+        const painter = focused ? ((x: string) => t.palette.accentBold(x)) : ((x: string) => t.palette.text(x));
+        lines.push(painter(`${icon} ${val ? 'Enabled' : 'Disabled'}`));
+        hits.set(lines.length - 1, () => { d.screenShare = val; app.markDirty(); app.prCursor = i; });
+    }
+
+    // ── Capture interval ──
+    {
+        const i = rowModel.findIndex(r2 => r2.kind === 'interval');
+        lines.push('');
+        lines.push(t.palette.dim('Screen capture interval (ms)'));
+        absRow(i, () => lines.length + 1);
+        const err = app.errors.get('screenIntervalMs');
+        const fieldLines = textInput(t, {
+            value: String(d.screenIntervalMs),
+            cursorPos: String(d.screenIntervalMs).length,
+            error: err ?? undefined,
+        }, 14);
+        for (const fl of fieldLines) lines.push('  ' + fl);
+        hits.set(lines.length - fieldLines.length, () => { app.prCursor = i; });
+    }
+
+    // ── Save action ──
+    lines.push('');
+    rowModel.forEach((r, i) => {
+        if (r.kind !== 'action') return;
+        const active = i === cursor;
+        const label = active ? ' Save Voice Settings ' : ' Save Voice Settings ';
+        lines.push(active ? t.palette.inverse(label) : t.palette.text(label));
+        hits.set(lines.length - 1, () => {
+            app.prCursor = i;
+            void app.applyAndThen(() => { /* stay */ });
+        });
+    });
+
+    function absRow(_i: number, _fn: () => number): void { /* helper kept for clarity */ }
+
+    uiState.set(app, 'focusRow', Math.max(0, lines.length - 4));
+    return { lines, rowHits: hits };
+}
+
+function handleVoice(app: SetupApp, key: KeyMsg): StepNav {
+    const rows = app.providerRows;
+    if (rows.length === 0) return 'continue';
+    let cur = Math.max(0, Math.min(rows.length - 1, app.prCursor));
+
+    switch (key.type) {
+        case 'up':
+        case 'shifttab':
+            cur--; break;
+        case 'down':
+        case 'tab':
+            cur++; break;
+        case 'enter':
+        case 'space': {
+            app.prCursor = cur;
+            const r: any = rows[cur];
+            if (!r) return 'continue';
+            const d = app.draft;
+            if (r.kind === 'voice') d.voiceName = r.id;
+            else if (r.kind === 'mic') d.defaultMic = r.id;
+            else if (r.kind === 'screenshare') d.screenShare = r.value;
+            else if (r.kind === 'interval') return 'continue';
+            else if (r.kind === 'action') { void app.applyAndThen(() => {}); }
+            app.markDirty();
+            return 'continue';
+        }
+        case 'char': {
+            const r: any = rows[cur];
+            if (r?.kind === 'interval' && /^[0-9]$/.test(key.text)) {
+                const s = String(app.draft.screenIntervalMs);
+                app.draft.screenIntervalMs = parseInt((s + key.text).slice(0, 6), 10) || 0;
+                app.markDirty();
+                app.errors.delete('screenIntervalMs');
+            }
+            return 'continue';
+        }
+        case 'backspace': {
+            const r: any = rows[cur];
+            if (r?.kind === 'interval') {
+                const s = String(app.draft.screenIntervalMs).slice(0, -1);
+                app.draft.screenIntervalMs = parseInt(s, 10) || 0;
+                app.markDirty();
+            }
+            return 'continue';
+        }
+        default:
+            return 'continue';
+    }
+    app.prCursor = Math.max(0, Math.min(rows.length - 1, cur));
+    return 'continue';
+}
+
+
 // ═══ SECURITY ═════════════════════════════════════════════
 
 const AUTONOMY_OPTIONS: Array<{ id: 'safe' | 'balanced' | 'autonomous'; label: string; desc: string }> = [
@@ -539,17 +756,42 @@ const AUTONOMY_OPTIONS: Array<{ id: 'safe' | 'balanced' | 'autonomous'; label: s
     { id: 'autonomous', label: 'Trusted mode', desc: 'No prompts except destructive actions.' },
 ];
 
+const FULL_ACCESS_OPTIONS: Array<{ value: boolean; label: string; desc: string }> = [
+    { value: true,  label: 'Full System Access',       desc: 'Rose can run any command. Only truly dangerous commands (format, shutdown, rm -rf /) are blocked.' },
+    { value: false, label: 'Restricted (ask first)',    desc: 'Rose will ask permission before running commands not on the safe list.' },
+];
+
 function renderSecurity(app: SetupApp, w: number): Fragment {
     const t = app.theme;
     const d = app.draft;
     const lines: string[] = [];
     const hits = new Map<number, () => void>();
 
+    // ── Full System Access (shown first, most important) ──
+    lines.push(heading(t, 'System Access Level'));
+    lines.push('');
+    FULL_ACCESS_OPTIONS.forEach((o, i) => {
+        const sel = d.fullAccess === o.value;
+        const focusedRow = i === app.securityIdx;
+        const icon = sel ? t.icons.radioOn : t.icons.radioOff;
+        const painter = focusedRow ? ((x: string) => t.palette.accentBold(x))
+            : sel ? ((x: string) => t.palette.accent(x)) : ((x: string) => t.palette.text(x));
+        lines.push(painter(`${focusedRow ? t.icons.selected : ' '} ${icon} ${o.label}${sel && !focusedRow ? t.palette.accent('  ←') : ''}`));
+        hits.set(lines.length - 1, () => {
+            d.fullAccess = o.value; app.markDirty();
+            refreshSecurityPreview(app);
+        });
+        lines.push('   ' + t.palette.dim(o.desc));
+    });
+    lines.push('');
+
+    // ── Autonomy Policy ──
     lines.push(heading(t, 'Default Action Policy'));
     lines.push('');
     AUTONOMY_OPTIONS.forEach((o, i) => {
+        const rowIdx = i + FULL_ACCESS_OPTIONS.length;
         const sel = o.id === d.autonomy;
-        const focusedRow = i === app.securityIdx;
+        const focusedRow = rowIdx === app.securityIdx;
         const icon = sel ? t.icons.radioOn : t.icons.radioOff;
         const painter = focusedRow ? ((x: string) => t.palette.accentBold(x))
             : sel ? ((x: string) => t.palette.accent(x)) : ((x: string) => t.palette.text(x));
@@ -560,12 +802,13 @@ function renderSecurity(app: SetupApp, w: number): Fragment {
         });
         lines.push('   ' + t.palette.dim(o.desc));
     });
-    uiState.set(app, 'focusRow', app.securityIdx < AUTONOMY_OPTIONS.length ? 2 + app.securityIdx * 2 : -1);
+    uiState.set(app, 'focusRow', app.securityIdx < (FULL_ACCESS_OPTIONS.length + AUTONOMY_OPTIONS.length) ? 2 + app.securityIdx * 2 : -1);
 
     // Policy matrix reflecting ACTUAL SecurityEngine semantics
     lines.push(heading(t, 'Effective Behavior'));
     lines.push('');
     const ask = (label: string, when: string) => statusRow(t, label, 'idle', when, 16);
+    lines.push(ask('System commands', d.fullAccess ? 'Allow all (denylist active)' : 'Allowlist only'));
     lines.push(ask('Destructive', 'Always ask'));
     lines.push(ask('External (email/push)', 'Always ask'));
     lines.push(ask('Terminal / system', d.autonomy === 'safe' ? 'Ask' : 'Allow silently'));
@@ -576,13 +819,32 @@ function renderSecurity(app: SetupApp, w: number): Fragment {
     const fed = checkboxRow(t, d.allowFederation, 'Allow agent federation (network delegation)', () => {
         d.allowFederation = !d.allowFederation; app.markDirty();
     });
-    if (app.securityIdx === AUTONOMY_OPTIONS.length) {
+    if (app.securityIdx === FULL_ACCESS_OPTIONS.length + AUTONOMY_OPTIONS.length) {
         uiState.set(app, 'focusRow', lines.length);
     }
     fed.rowHits?.forEach((cb, rel) => hits.set(lines.length + rel, cb));
     lines.push(...fed.lines);
     lines.push('');
     lines.push(t.palette.dim('The backend Policy Engine stays authoritative — the UI cannot bypass it.'));
+
+    // ── Action ──
+    lines.push('');
+    const btnIdx = FULL_ACCESS_OPTIONS.length + AUTONOMY_OPTIONS.length + 1;
+    const btnActive = app.securityIdx === btnIdx;
+    const btnLabel = app.mode === 'manager' ? ' Done → ' : ' Continue → ';
+    lines.push(btnActive ? t.palette.inverse(btnLabel) : t.palette.text(btnLabel));
+    hits.set(lines.length - 1, () => {
+        app.securityIdx = btnIdx;
+        if (app.mode === 'manager') {
+            app.openSection = null;
+        } else {
+            app.stepForward();
+        }
+    });
+
+    if (btnActive) {
+        uiState.set(app, 'focusRow', lines.length - 1);
+    }
 
     return { lines, rowHits: hits };
 }
@@ -1067,7 +1329,16 @@ function renderDashboard(app: SetupApp, w: number): Fragment {
         badge: dashboardBadge(app, s.id),
         value: s.id,
     }));
+    items.push({
+        label: app.dirty ? t.palette.accentBold('Save & Exit') : 'Exit',
+        badge: '',
+        value: 'exit'
+    });
     const list = selectList(t, items, Math.min(app.dashboardIdx, items.length - 1), (v) => {
+        if (v === 'exit') {
+            app.confirmExit();
+            return;
+        }
         const idx = MANAGER_SECTIONS.findIndex(s => s.id === v);
         app.dashboardIdx = idx;
         app.openSection = MANAGER_SECTIONS[idx].id;
@@ -1114,6 +1385,7 @@ export function createStepKeyHandler(app: SetupApp): (key: KeyMsg) => StepNav {
             case 'provider': return handleProvider(app, key);
             case 'workspace': return handleWorkspace(app, key);
             case 'memory': return handleMemory(app, key);
+            case 'voice': return handleVoice(app, key);
             case 'security': return handleSecurity(app, key);
             case 'appearance': return handleAppearance(app, key);
             case 'web': return handleWeb(app, key);
@@ -1157,6 +1429,11 @@ function handleProvider(app: SetupApp, key: KeyMsg): StepNav {
             if (r.kind === 'provider' && r.id) selectProvider(app, r.id as DraftConfig['provider']);
             else if (r.kind === 'model' && r.value) { app.draft.model = r.value; app.markDirty(); }
             else if (r.kind === 'action' && r.btn !== undefined) activateProviderAction(app, r.btn as 0 | 1);
+            else {
+                // Text rows: Enter advances toward the actions instead of
+                // doing nothing (bugfix: "Continue kaam nahi kar raha" feel).
+                app.prCursor = Math.min(rows.length - 1, cur + 1);
+            }
             return 'continue';
         }
         case 'char': {
@@ -1300,16 +1577,27 @@ function clampNumStr(s: string): number {
 
 function handleSecurity(app: SetupApp, key: KeyMsg): StepNav {
     const d = app.draft;
+    const totalRows = FULL_ACCESS_OPTIONS.length + AUTONOMY_OPTIONS.length + 2; // +1 for federation, +1 for continue button
     switch (key.type) {
-        case 'up': app.securityIdx = (app.securityIdx + AUTONOMY_OPTIONS.length) % (AUTONOMY_OPTIONS.length + 1); return 'continue';
-        case 'down': app.securityIdx = (app.securityIdx + 1) % (AUTONOMY_OPTIONS.length + 1); return 'continue';
+        case 'up': app.securityIdx = (app.securityIdx + totalRows - 1) % totalRows; return 'continue';
+        case 'down': app.securityIdx = (app.securityIdx + 1) % totalRows; return 'continue';
         case 'enter': case 'space': {
-            if (app.securityIdx < AUTONOMY_OPTIONS.length) {
-                d.autonomy = AUTONOMY_OPTIONS[app.securityIdx].id;
+            if (app.securityIdx < FULL_ACCESS_OPTIONS.length) {
+                d.fullAccess = FULL_ACCESS_OPTIONS[app.securityIdx].value;
                 app.markDirty();
-            } else {
+            } else if (app.securityIdx < FULL_ACCESS_OPTIONS.length + AUTONOMY_OPTIONS.length) {
+                const autoIdx = app.securityIdx - FULL_ACCESS_OPTIONS.length;
+                d.autonomy = AUTONOMY_OPTIONS[autoIdx].id;
+                app.markDirty();
+            } else if (app.securityIdx === FULL_ACCESS_OPTIONS.length + AUTONOMY_OPTIONS.length) {
                 d.allowFederation = !d.allowFederation;
                 app.markDirty();
+            } else {
+                if (app.mode === 'manager') {
+                    app.openSection = null;
+                } else {
+                    app.stepForward();
+                }
             }
             return 'continue';
         }
@@ -1439,14 +1727,19 @@ function handleComplete(app: SetupApp, key: KeyMsg): StepNav {
 }
 
 function handleDashboard(app: SetupApp, key: KeyMsg): StepNav {
+    const total = MANAGER_SECTIONS.length + 1;
     switch (key.type) {
-        case 'up': app.dashboardIdx = (app.dashboardIdx - 1 + MANAGER_SECTIONS.length) % MANAGER_SECTIONS.length; return 'continue';
-        case 'down': app.dashboardIdx = (app.dashboardIdx + 1) % MANAGER_SECTIONS.length; return 'continue';
+        case 'up': app.dashboardIdx = (app.dashboardIdx - 1 + total) % total; return 'continue';
+        case 'down': app.dashboardIdx = (app.dashboardIdx + 1) % total; return 'continue';
         case 'enter': {
-            app.openSection = MANAGER_SECTIONS[app.dashboardIdx]?.id ?? null;
+            if (app.dashboardIdx === MANAGER_SECTIONS.length) {
+                app.confirmExit();
+            } else {
+                app.openSection = MANAGER_SECTIONS[app.dashboardIdx]?.id ?? null;
+            }
             return 'continue';
         }
-        case 'esc': app.requestExit = true; return 'continue';
+        case 'esc': app.confirmExit(); return 'continue';
         default: return 'continue';
     }
 }

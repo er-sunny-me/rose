@@ -250,7 +250,9 @@ export class Screen {
         for (let y = 0; y < maxLen; y++) {
             const next = frame[y] ?? '';
             if (this.prevFrame[y] === next) continue;
-            out.push(`\x1b[${y + 1};1H\x1b[2K` + next);
+            // Leading + trailing reset: a clipped or unbalanced style must
+            // never bleed across rows (fixes literal "[39m" artifacts).
+            out.push(`\x1b[${y + 1};1H\x1b[2K\x1b[0m` + next + '\x1b[0m');
         }
         if (out.length > 0) {
             process.stdout.write(out.join(''));

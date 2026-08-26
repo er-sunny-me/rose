@@ -22,6 +22,7 @@ import { GitHubIntegration } from './integrations/github.js';
 import { GoogleIntegration } from './integrations/google.js';
 import { ObsidianVaultIndex } from './memory/obsidian.js';
 import { BrowserController } from './browser/controller.js';
+import { AndroidController } from './tools/android-tools.js';
 
 export class ToolRegistry {
   public static getDeclarations() {
@@ -194,6 +195,39 @@ export class ToolRegistry {
           },
           required: ['action'],
         },
+      },
+      {
+        name: 'android_click',
+        description: 'Click a UI element on the connected Android device by matching text.',
+        sideEffect: 'EXTERNAL_ACTION',
+        parameters: {
+          type: 'OBJECT',
+          properties: {
+            text: { type: 'STRING', description: 'The text of the UI element to click' }
+          },
+          required: ['text'],
+        },
+      },
+      {
+        name: 'android_swipe',
+        description: 'Swipe on the connected Android device screen.',
+        sideEffect: 'EXTERNAL_ACTION',
+        parameters: {
+          type: 'OBJECT',
+          properties: {
+            direction: { type: 'STRING', description: 'Direction to swipe (forward, backward)' }
+          },
+          required: ['direction'],
+        },
+      },
+      {
+        name: 'android_get_screen_text',
+        description: 'Get all text visible on the connected Android device screen.',
+        sideEffect: 'READ',
+        parameters: {
+          type: 'OBJECT',
+          properties: {}
+        },
       }
     ];
 
@@ -241,13 +275,13 @@ export class ToolExecutor {
       if (call.name === 'save_memory') {
         const entry = await MemoryService.save(call.args);
         result = `Successfully saved memory: ${entry.id} (${entry.name})`;
-        console.log(chalk.blue(`   [Memory Saved] ${entry.name}`));
+        // console.log tool event
       } else if (call.name === 'search_memory') {
         const entries = await MemoryService.search({ query: call.args.query, project: call.args.project });
         result = entries.length > 0 ? MemoryService.formatContextBlock(entries) : `No memory found for query: ${call.args.query}`;
-        console.log(chalk.blue(`   [Memory Searched] Found ${entries.length} entries for "${call.args.query}"`));
+        // console.log tool event
       } else if (call.name === 'execute_command') {
-        console.log(chalk.magenta(`   [Executing Command...] ${call.args.command}`));
+        // console.log tool event
         // Phase 34: layered sandbox — denylist, parser, allowlist, dir jail,
         // env filtering, output caps and process-group cleanup. A dry_run
         // request returns the decision report without starting a process.
@@ -276,10 +310,10 @@ export class ToolExecutor {
               : (outcome.stdout || outcome.stderr || 'Command executed successfully with no output.')
                 + (outcome.truncated ? '\n[output truncated by sandbox limit]' : '');
         }
-        console.log(chalk.magenta(`   [Command Result] \n${chalk.gray(result.substring(0, 500) + (result.length > 500 ? '...' : ''))}`));
+        // console.log tool event
       } else if (call.name === 'search_obsidian') {
         // Phase 34: real Obsidian RAG with source citations.
-        console.log(chalk.blue(`   [Obsidian Search] ${call.args.query}`));
+        // console.log tool event
         try {
           const vaultPath = ObsidianVaultIndex.configuredVault();
           if (!vaultPath) {
@@ -292,14 +326,14 @@ export class ToolExecutor {
               result = 'No relevant notes found in the vault for that query.';
             } else {
               result = ObsidianVaultIndex.formatCitations(hits);
-              console.log(chalk.blue(`   [Obsidian] ${hits.length} note excerpt(s): ${hits.map(h => h.notePath).join(', ')}`));
+              // console.log tool event
             }
           }
         } catch (e: any) {
           result = `Obsidian search failed: ${e.message}`;
         }
       } else if (call.name === 'web_search') {
-        console.log(chalk.blue(`   [Web Search] ${call.args.query}`));
+        // console.log tool event
         try {
           const response = await fetch(`https://lite.duckduckgo.com/lite/`, {
              method: 'POST',
@@ -323,7 +357,7 @@ export class ToolExecutor {
           result = `Web search failed: ${e.message}`;
         }
       } else if (call.name === 'fetch_page') {
-        console.log(chalk.blue(`   [Fetch Page] ${call.args.url}`));
+        // console.log tool event
         try {
           const response = await fetch(call.args.url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
           if (!response.ok) throw new Error(`Status ${response.status}`);
@@ -341,7 +375,7 @@ export class ToolExecutor {
         }
       } else if (call.name === 'service_github') {
         // Phase 34: real GitHub REST API via Octokit (replaces gh CLI stub).
-        console.log(chalk.blue(`   [GitHub Service] ${call.args.action} on ${call.args.repo}`));
+        // console.log tool event
         if (!GitHubIntegration.isConfigured()) {
           result = 'GitHub not configured. Set GITHUB_TOKEN (env) or keys.github in config, then retry.';
         } else {
@@ -393,7 +427,7 @@ export class ToolExecutor {
         }
       } else if (call.name === 'service_calendar') {
         const action = call.args.action;
-        console.log(chalk.blue(`   [Calendar Service] ${action}`));
+        // console.log tool event
         if (!GoogleIntegration.isConfigured()) {
           result = 'Google not configured. Complete OAuth setup (GOOGLE_CREDENTIALS / keys.google) to enable Calendar.';
         } else {
@@ -434,7 +468,7 @@ export class ToolExecutor {
         }
       } else if (call.name === 'service_email') {
         const action = call.args.action;
-        console.log(chalk.blue(`   [Email Service] ${action}`));
+        // console.log tool event
         if (!GoogleIntegration.isConfigured()) {
           result = 'Gmail not configured. Complete OAuth setup (GOOGLE_CREDENTIALS / keys.google) to enable email.';
         } else {
@@ -477,10 +511,21 @@ export class ToolExecutor {
         }
       } else if (call.name === 'browser_control') {
         // Phase 34: Playwright-backed, domain-policy-controlled browsing.
-        console.log(chalk.blue(`   [Browser] ${call.args.action} ${call.args.url || call.args.selector || ''}`));
+        // console.log tool event
         const controller = new BrowserController();
         if (!controller.available) {
-          result = 'Browser automation unavailable: install Playwright (npm i playwright && npx playwright install chromium).';
+          // Graceful degrade: plain open/navigate still works via the system
+          // browser through the sandboxed URL-opener rule.
+          const url = String(call.args.url ?? '');
+          if ((call.args.action === 'open' || call.args.action === 'navigate') && /^https?:\/\//i.test(url)) {
+            const opener = process.platform === 'win32' ? 'start ""' : process.platform === 'darwin' ? 'open' : 'xdg-open';
+            const outcome = await runSandboxed(`${opener} ${url}`);
+            result = outcome.decision === 'ALLOW'
+              ? `Opened ${url} in the system browser. (Playwright not installed — install it with "npm i playwright && npx playwright install chromium" for click/type/extract actions.)`
+              : `Browser automation unavailable and system-browser open was blocked (${outcome.decision}): ${outcome.reason}`;
+          } else {
+            result = 'Browser automation unavailable: install Playwright (npm i playwright && npx playwright install chromium).';
+          }
         } else {
           try {
             const action = String(call.args.action);
@@ -526,11 +571,20 @@ export class ToolExecutor {
             await controller.close();
           }
         }
+      } else if (call.name === 'android_click') {
+        // console.log tool event
+        result = await AndroidController.executeAction('click_text', { text: String(call.args.text) });
+      } else if (call.name === 'android_swipe') {
+        // console.log tool event
+        result = await AndroidController.executeAction(`scroll_${call.args.direction || 'forward'}`, {});
+      } else if (call.name === 'android_get_screen_text') {
+        // console.log tool event
+        result = await AndroidController.executeAction('get_screen_text', {});
       } else if (call.name.startsWith('mcp_')) {
         // e.g. "mcp_filesystem_read_file" -> serverId = "filesystem"
         const parts = call.name.split('_');
         const serverId = parts[1];
-        console.log(chalk.blue(`   [MCP Service] ${serverId} : ${call.name}`));
+        // console.log tool event
         try {
           result = await McpClientManager.callTool(serverId, call.name, call.args);
         } catch (e: any) {

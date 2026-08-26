@@ -229,7 +229,7 @@ class AsciiIcons implements IconSet {
     teeRight = '+'; teeLeft = '+';
 }
 
-// ─── Visible-width text helpers (ANSI-aware) ─────────────────
+// ─── Visible-width text helpers (ANSI-aware + Unicode-width aware) ──────
 
 const ANSI_RE = /\x1b\[[0-9;]*m/g;
 
@@ -237,30 +237,98 @@ export function stripAnsi(s: string): string {
     return s.replace(ANSI_RE, '');
 }
 
-export function visibleLength(s: string): number {
-    return stripAnsi(s).length;
+/**
+ * Display width of one code point. BUGFIX for glitchy layouts with Hindi and
+ * emoji: combining marks (Devanagari matras/virama, accents, variation
+ * selectors) render as ZERO cells, while East-Asian/emoji glyphs render as
+ * TWO cells. Counting UTF-16 units broke every panel border.
+ */
+export function charWidth(cp: number): number {
+    // Zero-width: combining diacriticals, Devanagari sign clusters,
+    // generic extenders, variation selectors, ZWJ/ZWNJ, control chars.
+    if (
+        (cp >= 0x0300 && cp <= 0x036f) ||
+        (cp >= 0x0900 && cp <= 0x0903) ||   // Devanagari signs (incl. candrabindu/visarga)
+        (cp >= 0x093a && cp <= 0x094f) ||   // nukta, matras, virama
+        (cp >= 0x0951 && cp <= 0x0957) ||
+        cp === 0x0962 || cp === 0x0963 ||
+        (cp >= 0x1ab0 && cp <= 0x1aff) ||
+        (cp >= 0x1dc0 && cp <= 0x1dff) ||
+        (cp >= 0x20d0 && cp <= 0x20ff) ||
+        cp === 0x200c || cp === 0x200d ||   // ZWNJ / ZWJ
+        (cp >= 0xfe00 && cp <= 0xfe0f) ||   // variation selectors
+        (cp >= 0xfe20 && cp <= 0xfe2f) ||
+        cp === 0x00ad ||
+        (cp >= 0x0001 && cp <= 0x001f)
+    ) {
+        return 0;
+    }
+
+    // Double-width: CJK, Hangul, fullwidth forms, most emoji blocks.
+    if (
+        (cp >= 0x1100 && cp <= 0x115f) ||
+        (cp >= 0x2e80 && cp <= 0x303e) ||
+        (cp >= 0x3041 && cp <= 0x33ff) ||
+        (cp >= 0x3400 && cp <= 0x4dbf) ||
+        (cp >= 0x4e00 && cp <= 0x9fff) ||
+        (cp >= 0xa000 && cp <= 0xa4cf) ||
+        (cp >= 0xa960 && cp <= 0xa97f) ||
+        (cp >= 0xac00 && cp <= 0xd7a3) ||
+        (cp >= 0xf900 && cp <= 0xfaff) ||
+        (cp >= 0xfe10 && cp <= 0xfe19) ||
+        (cp >= 0xfe30 && cp <= 0xfe6f) ||
+        (cp >= 0xff00 && cp <= 0xff60) ||
+        (cp >= 0xffe0 && cp <= 0xffe6) ||
+        (cp >= 0x1f300 && cp <= 0x1f64f) ||
+        (cp >= 0x1f680 && cp <= 0x1f6ff) ||
+        (cp >= 0x1f900 && cp <= 0x1f9ff) ||
+        (cp >= 0x1fa70 && cp <= 0x1faff) ||
+        cp === 0x2329 || cp === 0x232a ||
+        cp === 0x303f
+    ) {
+        return 2;
+    }
+
+    return 1;
 }
 
-/** Truncate to at most max visible columns without breaking escape sequences. */
+/** Visible display columns of a styled string. */
+export function visibleLength(s: string): number {
+    let total = 0;
+    let inAnsi = false;
+    for (let i = 0; i < s.length; i++) {
+        const ch = s[i];
+        if (ch === '\x1b') { inAnsi = true; continue; }
+        if (inAnsi) {
+            if (ch === 'm') inAnsi = false;
+            continue;
+        }
+        const cp = s.codePointAt(i)!;
+        total += charWidth(cp);
+        if (cp > 0xffff) i++;
+    }
+    return total;
+}
+
+/** Truncate to at most `max` visible columns without breaking escape sequences. */
 export function truncateVisible(s: string, max: number): string {
     if (max <= 0) return '';
     let out = '';
     let vis = 0;
-    let i = 0;
-    while (i < s.length && vis < max) {
-        if (s[i] === '\x1b') {
-            const m = ANSI_RE.exec(s.slice(i));
-            if (m && m.index === 0) {
-                out += m[0];
-                i += m[0].length;
-                continue;
-            }
-            i++;
+    let inAnsi = false;
+    for (let i = 0; i < s.length; i++) {
+        const ch = s[i];
+        if (inAnsi) {
+            out += ch;
+            if (ch === 'm') inAnsi = false;
             continue;
         }
-        out += s[i];
-        vis++;
-        i++;
+        if (ch === '\x1b') { inAnsi = true; out += ch; continue; }
+        if (vis >= max) break;
+        const cp = s.codePointAt(i)!;
+        out += s.slice(i, i + (cp > 0xffff ? 2 : 1));
+        vis += charWidth(cp);
+        if (cp > 0xffff) i++;
     }
     return out;
 }

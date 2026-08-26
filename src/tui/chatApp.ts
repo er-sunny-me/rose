@@ -8,7 +8,7 @@
  * token usage and API-reported cost when available.
  */
 import { Screen, KeyMsg } from './screen.js';
-import { Theme, padEndVisible, visibleLength } from './theme.js';
+import { Theme, padEndVisible, visibleLength, stripAnsi } from './theme.js';
 import { panel } from './widgets.js';
 import { Config } from '../config.js';
 import { getSystemInstruction } from '../context.js';
@@ -39,10 +39,12 @@ interface TranscriptEntry {
     text: string;
 }
 
+const CHAT_COMMANDS = ['/help', '/model', '/models', '/voice', '/clear', '/exit', '/quit'];
+
 const MIN_COLS = 46;
 const MIN_ROWS = 16;
 
-/** Word-wrap a plain string to `width` visible columns. */
+/** Word-wrap a plain string to `width` display columns (Unicode-width aware). */
 export function wrapText(text: string, width: number): string[] {
     const out: string[] = [];
     for (const rawLine of text.split('\n')) {
@@ -50,14 +52,22 @@ export function wrapText(text: string, width: number): string[] {
         let current = '';
         for (const word of rawLine.split(/\s+/)) {
             const candidate = current ? current + ' ' + word : word;
-            if (candidate.length <= width) {
+            if (visibleLength(candidate) <= width) {
                 current = candidate;
             } else {
                 if (current) out.push(current);
-                if (word.length > width) {
+                if (visibleLength(word) > width) {
                     // hard-break very long tokens (urls etc.)
                     let rest = word;
-                    while (rest.length > width) { out.push(rest.slice(0, width)); rest = rest.slice(width); }
+                    while (visibleLength(rest) > width) {
+                        let cut = '';
+                        for (const ch of rest) {
+                            if (visibleLength(cut + ch) > width) break;
+                            cut += ch;
+                        }
+                        out.push(cut);
+                        rest = rest.slice(cut.length);
+                    }
                     current = rest;
                 } else {
                     current = word;
@@ -69,35 +79,94 @@ export function wrapText(text: string, width: number): string[] {
     return out;
 }
 
-/** Default responder: existing Model Router, streaming when the provider supports it. */
+/** Language directive appended to the system prompt (default: Hinglish). */
+export function languageDirective(): string {
+    const override = process.env.ROSE_LANG;
+    if (override) return `\n\nAlways respond in ${override}.`;
+    return '\n\nAlways reply in Hinglish (Roman Hindi mixed with English, e.g. "haan bilkul, ye kar deta hoon"). Keep technical terms in English. Only switch language when the user explicitly writes in pure Hindi or another language.';
+}
+
+import { ToolRegistry, ToolExecutor } from '../tools.js';
+
+/** Default responder: existing Model Router, streaming when the provider supports it.
+ *  Phase 37 fix: now includes tool declarations and an agentic tool loop so the
+ *  TUI can execute commands, search the web, check battery etc. */
 export function createRouterResponder(): ChatResponder {
     return async (messages, system, onDelta) => {
         const started = Date.now();
-        const cfg = Config.get();
-        const providers = ModelRouter.getProviders();
-        const preferred = providers.find(p => p.id === cfg.agent?.model)
-            ?? providers.find(p => p.health !== 'OPEN')
-            ?? providers[0];
+        const roseTools = ToolRegistry.getDeclarations();
+        const MAX_TOOL_ITERATIONS = 6;
 
-        if (preferred && typeof (preferred as any).executeStream === 'function') {
-            const res = await (preferred as any).executeStream(messages, system, 2048, (d: string) => onDelta?.(d));
-            return {
-                text: res?.content?.[0]?.text ?? '',
-                model: res?.model ?? preferred.id,
-                usage: res?.usage ? {
-                    promptTokens: res.usage.promptTokens,
-                    completionTokens: res.usage.completionTokens,
-                    costUsd: res.usage.costUsd,
-                } : undefined,
-                durationMs: Date.now() - started,
-            };
+        // Build a working copy of the conversation for the tool loop.
+        const convo = messages.map(m => ({
+            role: m.role === 'assistant' ? 'assistant' as const : 'user' as const,
+            content: m.content,
+        }));
+
+        let finalText = '';
+
+        for (let iteration = 0; iteration < MAX_TOOL_ITERATIONS; iteration++) {
+            const res: any = await ModelRouter.route(
+                { intent: 'generation', maxTokens: 4096, tools: roseTools },
+                convo,
+                system,
+            );
+
+            // ── Extract function calls across provider shapes ──
+            const fnCalls: Array<{ id: string; name: string; args: any }> = [];
+            let textParts: string[] = [];
+
+            // Gemini / Anthropic shape: res.content is an array of parts
+            if (res?.content && Array.isArray(res.content)) {
+                for (const part of res.content) {
+                    if (part?.type === 'tool_use' && part.name) {
+                        fnCalls.push({ id: part.id || `tc_${iteration}_${fnCalls.length}`, name: part.name, args: part.input ?? {} });
+                    } else if (part?.functionCall?.name) {
+                        fnCalls.push({ id: `tc_${iteration}_${fnCalls.length}`, name: part.functionCall.name, args: part.functionCall.args ?? {} });
+                    } else if ((part?.type === 'text' || !part?.type) && part?.text) {
+                        textParts.push(part.text);
+                    }
+                }
+            }
+            // OpenAI shape: res.choices[0].message.tool_calls
+            const openaiCalls = res?.choices?.[0]?.message?.tool_calls;
+            if (Array.isArray(openaiCalls)) {
+                for (const tc of openaiCalls) {
+                    if (tc?.function?.name) {
+                        let parsedArgs: any = {};
+                        try { parsedArgs = JSON.parse(tc.function.arguments || '{}'); } catch { /* keep {} */ }
+                        fnCalls.push({ id: tc.id || `tc_${iteration}_${fnCalls.length}`, name: tc.function.name, args: parsedArgs });
+                    }
+                }
+            }
+
+            // No tool calls → we have the final answer
+            if (fnCalls.length === 0) {
+                finalText = textParts.join('\n') || res?.choices?.[0]?.message?.content || '';
+                break;
+            }
+
+            // ── Execute each tool ──
+            for (const call of fnCalls) {
+                onDelta?.(`\n🔧 ${call.name}…\n`);
+                let resultText: string;
+                try {
+                    const response = await ToolExecutor.execute(call);
+                    resultText = typeof response === 'string'
+                        ? response
+                        : JSON.stringify(response?.response ?? response?.result ?? response);
+                } catch (e: any) {
+                    resultText = `Tool error: ${e.message}`;
+                }
+                // Feed the tool result back into the conversation
+                convo.push({ role: 'assistant', content: `[called tool ${call.name} with ${JSON.stringify(call.args)}]` });
+                convo.push({ role: 'user', content: `[TOOL RESULT ${call.name}]:\n${String(resultText).slice(0, 8000)}` });
+            }
         }
 
-        const res = await ModelRouter.route({ intent: 'chat', maxTokens: 2048 }, messages, system);
-        let text = '';
-        if (Array.isArray(res?.content)) text = res.content.map((p: any) => p.text || '').join('');
-        else text = res?.choices?.[0]?.message?.content || '';
-        return { text, model: res?.model ?? preferred?.id, durationMs: Date.now() - started };
+        if (!finalText) finalText = 'Tools were used but the model did not produce a final answer.';
+
+        return { text: finalText, model: undefined, durationMs: Date.now() - started };
     };
 }
 
@@ -171,6 +240,10 @@ export class ChatTui {
     private history: Array<{ role: 'user' | 'assistant'; content: string }> = [];
     private spinnerTimer: NodeJS.Timeout | null = null;
     private quitResolve: (() => void) | null = null;
+    /** Set by /exit — the key loop checks it after each draw. */
+    quitRequested = false;
+    /** Set by /voice — CLI launches the voice app after clean TUI exit. */
+    voiceRequested = false;
 
     constructor(opts: { responder?: ChatResponder; greeting?: string } = {}) {
         this.theme = new Theme(Config.get().appearance);
@@ -208,9 +281,11 @@ export class ChatTui {
                 : '');
         }
 
+        // Slash suggestions occupy an extra row above the input when active.
+        const suggesting = !this.busy && this.input.startsWith('/') && !this.input.includes(' ');
         const headerLines = 2;
         const footerLines = 2;
-        const bodyH = h - headerLines - footerLines - 1; // −1 input row
+        const bodyH = Math.max(4, h - headerLines - footerLines - (suggesting ? 2 : 1));
 
         const wide = w >= 92;
         const modelW = wide ? Math.min(34, Math.floor(w * 0.3)) : 0;
@@ -219,7 +294,11 @@ export class ChatTui {
         // ── Header ──
         const info = describeActiveModel();
         const title = ` ${t.icons.logo === 'ROSE' ? '' : t.icons.logo + ' '}ROSE CHAT`.trimStart();
-        const right = t.palette.dim(`${info.providerKind} · ${shorten(info.activeId, Math.max(10, Math.floor(w / 3)))}`);
+        // Dedupe when provider kind and model id are identical strings.
+        const rightText = info.providerKind === info.activeId
+            ? shorten(info.activeId, Math.max(10, Math.floor(w / 3)))
+            : `${info.providerKind} · ${shorten(info.activeId, Math.max(8, Math.floor(w / 3) - info.providerKind.length - 3))}`;
+        const right = t.palette.dim(rightText);
         const header = truncateVisible(padEndVisible(title, Math.max(1, w - visibleLength(right))) + right, w);
         const sep = t.palette.border('─'.repeat(Math.min(w, 200)));
 
@@ -298,11 +377,20 @@ export class ChatTui {
             body = leftCol;
         }
 
-        // ── Input row ──
+        // ── Input row (+ slash-command suggestions while typing) ──
         const caret = this.busy ? ' ' : t.palette.accentBold('│');
         const shownInput = truncateVisible(this.input, chatW - 6);
         const inputRow = ' ' + t.palette.accentBold('› ') + t.palette.text(shownInput) + caret +
             (this.confirmQuit ? '   ' + t.palette.warn('Quit? (y/n)') : '');
+
+        let suggestionLine = '';
+        if (suggesting) {
+            const matches = CHAT_COMMANDS.filter(c => c.startsWith(this.input.toLowerCase()));
+            if (matches.length > 0) {
+                suggestionLine = ' ' + t.palette.dim(matches.join('   ')) +
+                    (matches.length === 1 ? t.palette.dim('   Tab/Enter to run') : '');
+            }
+        }
 
         // ── Footer ──
         const hints = t.palette.dim('Enter send · ↑↓ scroll · Ctrl+L clear · Esc quit') +
@@ -311,10 +399,14 @@ export class ChatTui {
 
         const frame: string[] = [header, sep];
         for (let i = 0; i < bodyH; i++) frame.push(body[i] ?? '');
+        if (suggestionLine) frame.push(truncateVisible(suggestionLine, w));
         frame.push(truncateVisible(inputRow, w));
         frame.push(footerSep);
         frame.push(' ' + truncateVisible(hints, w - 2));
-        return frame;
+
+        // Hard guarantee: no composed row can ever exceed the terminal width,
+        // whatever the content (long tokens, wide glyphs, hint collisions).
+        return frame.map(l => truncateVisible(l, w));
     }
 
     streamingText = 'thinking…';
@@ -357,6 +449,14 @@ export class ChatTui {
             case 'space':
                 this.input += ' ';
                 return 'continue';
+            case 'tab': {
+                // Complete a unique slash command
+                if (this.input.startsWith('/') && !this.input.includes(' ')) {
+                    const matches = CHAT_COMMANDS.filter(c => c.startsWith(this.input.toLowerCase()));
+                    if (matches.length === 1) this.input = matches[0];
+                }
+                return 'continue';
+            }
             case 'enter':
                 void this.submitCurrentInput();
                 return 'continue';
@@ -373,17 +473,99 @@ export class ChatTui {
         }
     }
 
-    /** Send whatever is typed. Public for tests. */
+    /** Send whatever is typed. Slash commands are handled locally (public for tests). */
     async submitCurrentInput(): Promise<void> {
         const text = this.input.trim();
         if (!text || this.busy) return;
         this.input = '';
         this.scrollFromBottom = 0;
 
+        if (text.startsWith('/')) {
+            this.handleCommand(text);
+            return;
+        }
+
         this.transcript.push({ role: 'you', text });
         this.history.push({ role: 'user', content: text });
 
         await this.generate();
+    }
+
+    /** Local slash commands — the old readline chat's command surface, TUI-native. */
+    handleCommand(raw: string): void {
+        const cmd = raw.toLowerCase().split(/\s+/)[0];
+        const info = describeActiveModel();
+        switch (cmd) {
+            case '/help':
+                this.transcript.push({ role: 'sys', text: [
+                    'Commands:',
+                    '  /help            this list',
+                    '  /model           which model is running (tier, context, health)',
+                    '  /models          same as /model — active model details',
+                    '  /voice           switch to voice-to-voice mode (mic + Live)',
+                    '  /clear           clear the conversation',
+                    '  /exit  /quit     leave the TUI (Esc also works)',
+                    '',
+                    'Anything else is sent to the model.',
+                ].join('\n') });
+                break;
+            case '/model':
+            case '/models':
+            case '/status': {
+                const args = raw.trim().split(/\s+/);
+                if (args.length > 1 && (cmd === '/model' || cmd === '/models')) {
+                    const newModel = args[1];
+                    const cfg = Config.get();
+                    cfg.agent.model = newModel;
+                    Config.saveConfig({ agent: cfg.agent });
+                    this.transcript.push({ role: 'sys', text: `Switched model to: ${newModel}` });
+                    break;
+                }
+
+                if (cmd === '/models') {
+                    const providers = ModelRouter.getProviders();
+                    const lines = providers.map((p: any) => `  ${p.id} [${p.tier || 'Standard'}]${p.id === info.activeId ? ' (active)' : ''}`);
+                    this.transcript.push({ role: 'sys', text: [
+                        'Available Models:',
+                        ...lines,
+                        '',
+                        'Type /model <id> to switch live.'
+                    ].join('\n') });
+                    break;
+                }
+
+                const last = this.lastReplyInfo
+                    ? `Last reply by: ${this.lastReplyInfo.model} (${(this.lastReplyInfo.durationMs / 1000).toFixed(1)}s${this.lastReplyInfo.usage?.costUsd !== undefined ? `, $${this.lastReplyInfo.usage.costUsd.toFixed(4)}` : ''})`
+                    : 'No replies yet.';
+                this.transcript.push({ role: 'sys', text: [
+                    `Configured : ${info.configuredId}`,
+                    `Answering  : ${info.activeId} [${info.tier}]`,
+                    `Context    : ${info.contextLabel}${info.chips.length ? `   ${info.chips.join(' · ')}` : ''}`,
+                    `Health     : ${info.health}${info.remote ? '  (external service)' : ''}`,
+                    last,
+                    '',
+                    'Type /models to see available models.'
+                ].join('\n') });
+                break;
+            }
+            case '/voice':
+                // Real handoff: TUI cleanly exits and the CLI launches voice mode.
+                this.transcript.push({ role: 'sys', text: '🎙️  Switching to voice mode… (terminal will hand over)' });
+                this.voiceRequested = true;
+                this.quitRequested = true;
+                break;
+            case '/clear':
+                this.transcript = [];
+                this.history = [];
+                this.scrollFromBottom = 0;
+                break;
+            case '/exit':
+            case '/quit':
+                this.quitRequested = true;
+                break;
+            default:
+                this.transcript.push({ role: 'sys', text: `Unknown command "${cmd}". Type /help for the list.` });
+        }
     }
 
     /** Generate a Rose reply using the injected/router responder. */
@@ -395,14 +577,24 @@ export class ChatTui {
         // Live placeholder that streams deltas into the transcript.
         const streamEntry: TranscriptEntry = { role: 'rose', text: '' };
         let streamed = false;
+        let lastPaint = 0;
         const onDelta = (d: string) => {
             if (!streamed) { streamed = true; this.transcript.push(streamEntry); this.scrollFromBottom = 0; }
             streamEntry.text += d;
             this.streamingText = 'streaming…';
+            // Repaint while streaming even when animations are disabled.
+            const now = Date.now();
+            if (now - lastPaint > 50) { lastPaint = now; this.draw(); }
         };
 
         try {
-            const reply = await this.responder(this.history.slice(), getSystemInstruction(), onDelta);
+            // Language directive applied HERE so every responder (router or
+            // injected test double) receives the same baseline instruction.
+            const reply = await this.responder(
+                this.history.slice(),
+                getSystemInstruction() + languageDirective(),
+                onDelta,
+            );
             if (!streamed) {
                 this.transcript.push({ role: 'rose', text: reply.text || '(empty reply)' });
             } else if (reply.text && reply.text !== streamEntry.text) {
@@ -426,6 +618,9 @@ export class ChatTui {
             this.busy = false;
             this.stopSpinnerTick();
             this.scrollFromBottom = 0;
+            // BUGFIX: the spinner tick stopped — paint the FINAL state now,
+            // otherwise the reply stays invisible until the next keypress.
+            this.draw();
         }
     }
 
@@ -451,7 +646,7 @@ export class ChatTui {
             const key = await this.screen.readKey();
             const result = this.handleKey(key);
             this.draw();
-            if (result === 'quit') {
+            if (result === 'quit' || this.quitRequested) {
                 this.quitResolve?.();
                 return;
             }
@@ -477,8 +672,6 @@ function tierLabel(tier: string): string {
 }
 
 function chipsNonEmpty(c: string[]): boolean { return c.length > 0; }
-
-function stripAnsi(s: string): string { return s.replace(/\x1b\[[0-9;]*m/g, ''); }
 
 function center(s: string, w: number): string {
     const left = Math.max(0, Math.floor((w - stripAnsi(s).length) / 2));

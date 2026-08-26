@@ -1,4 +1,4 @@
-﻿import fs from 'fs';
+import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { AppearanceConfig } from './tui/theme.js';
@@ -40,6 +40,11 @@ export interface AppConfig {
         allowFederation: boolean;
         /** Phase 33: maps to SecurityEngine autonomy modes. */
         autonomy?: 'safe' | 'balanced' | 'autonomous';
+        /** Full admin-level access: sandbox only blocks denylist patterns.
+         *  When false, executables must be on the allowlist. Default: true. */
+        fullAccess?: boolean;
+        /** Extra executables the sandbox may run without approval. */
+        sandboxAllowlist?: string[];
     };
     observability: {
         logLevel: 'debug' | 'info' | 'warn' | 'error';
@@ -54,6 +59,15 @@ export interface AppConfig {
         maxEntriesPerType?: number;
     };
     appearance?: AppearanceConfig;
+    /** Voice (Gemini Live) preferences — setup wizard editable. */
+    voice?: {
+        voiceName?: string;
+        defaultMic?: string;
+        screenShare?: boolean;
+        screenIntervalMs?: number;
+        modelLive?: string;
+        modelText?: string;
+    };
     /** Phase 35: OpenRouter endpoint override (defaults to the official API). */
     openrouter?: {
         baseUrl?: string;
@@ -62,6 +76,7 @@ export interface AppConfig {
         enabled?: boolean;
         host?: string;
         port?: number;
+        token?: string;
     };
     setup?: SetupState;
 }
@@ -74,7 +89,8 @@ class ConfigurationEngine {
     }
 
     public getGlobalDir(): string {
-        if (process.env.ROSE_HOME) return process.env.ROSE_HOME;
+        const envHome = process.env.ROSE_HOME?.trim();
+        if (envHome && envHome !== 'undefined' && envHome !== 'null') return envHome;
         return path.join(os.homedir(), '.rose');
     }
 
@@ -107,7 +123,8 @@ class ConfigurationEngine {
             },
             security: {
                 requireApprovals: process.env.REQUIRE_APPROVALS === 'true' || env === 'production',
-                allowFederation: process.env.ALLOW_FEDERATION === 'true'
+                allowFederation: process.env.ALLOW_FEDERATION === 'true',
+                fullAccess: true
             },
             observability: {
                 logLevel: (process.env.LOG_LEVEL as any) || 'info'
@@ -134,6 +151,8 @@ class ConfigurationEngine {
                 if (gc.server?.port) cfg.server.port = gc.server.port;
                 if (gc.security?.requireApprovals !== undefined) cfg.security.requireApprovals = gc.security.requireApprovals;
                 if (gc.security?.allowFederation !== undefined) cfg.security.allowFederation = gc.security.allowFederation;
+                if (gc.security?.fullAccess !== undefined) cfg.security.fullAccess = gc.security.fullAccess;
+                if (Array.isArray(gc.security?.sandboxAllowlist)) cfg.security.sandboxAllowlist = gc.security.sandboxAllowlist;
                 if (gc.observability?.logLevel) cfg.observability.logLevel = gc.observability.logLevel;
                 // Backwards compatibility: old config had agent.apiKey
                 if (gc.agent?.apiKey && !gc.keys?.gemini) cfg.keys.gemini = gc.agent.apiKey;
@@ -142,6 +161,7 @@ class ConfigurationEngine {
                 if (gc.workspace && typeof gc.workspace === 'object') cfg.workspace = gc.workspace;
                 if (gc.memory && typeof gc.memory === 'object') cfg.memory = gc.memory;
                 if (gc.appearance && typeof gc.appearance === 'object') cfg.appearance = gc.appearance;
+                if (gc.voice && typeof gc.voice === 'object') cfg.voice = gc.voice;
                 if (gc.web && typeof gc.web === 'object') cfg.web = gc.web;
                 if (gc.setup && typeof gc.setup === 'object') cfg.setup = gc.setup;
             } catch (e) {

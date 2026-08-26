@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { Config } from '../config.js';
 import fs from 'fs';
 import path from 'path';
 import type { Request, Response, NextFunction } from 'express';
@@ -28,7 +29,13 @@ export class AuthService {
     }
 
     private static tokenFile(): string {
-        return path.join(process.cwd(), '.rose', 'auth-token');
+        // Prefer the global Rose home so containers/volumes keep the token
+        // persistent (ROSE_HOME=/data/.rose in cloud images).
+        try {
+            return path.join(Config.getGlobalDir(), '.rose', 'auth-token');
+        } catch {
+            return path.join(process.cwd(), '.rose', 'auth-token');
+        }
     }
 
     /** Resolve (or create) the API token. */

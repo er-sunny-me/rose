@@ -20,7 +20,7 @@ import { uiState } from './steps.js';
 import { runHealthChecks, summarize as summarizeChecks } from './health.js';
 
 export type StepId =
-    | 'welcome' | 'provider' | 'workspace' | 'memory' | 'security'
+    | 'welcome' | 'provider' | 'workspace' | 'memory' | 'voice' | 'security'
     | 'appearance' | 'web' | 'review' | 'health' | 'complete';
 
 interface StepDef { id: StepId; nav: string; }
@@ -30,6 +30,7 @@ export const WIZARD_STEPS: StepDef[] = [
     { id: 'provider', nav: 'AI Provider' },
     { id: 'workspace', nav: 'Workspace' },
     { id: 'memory', nav: 'Memory' },
+    { id: 'voice', nav: 'Voice' },
     { id: 'security', nav: 'Security' },
     { id: 'appearance', nav: 'Appearance' },
     { id: 'web', nav: 'Web Control' },
@@ -42,6 +43,7 @@ export const MANAGER_SECTIONS: StepDef[] = [
     { id: 'provider', nav: 'AI Provider' },
     { id: 'workspace', nav: 'Workspace' },
     { id: 'memory', nav: 'Memory' },
+    { id: 'voice', nav: 'Voice' },
     { id: 'security', nav: 'Security' },
     { id: 'appearance', nav: 'Appearance' },
     { id: 'web', nav: 'Web Control' },
@@ -374,6 +376,7 @@ export class SetupApp {
                 'Configuration applied.',
                 result.backupPath ? `Backup kept: ${shortenHome(result.backupPath)}` : '',
             ].filter(Boolean));
+            this.drawFrame(); // paint result without waiting for a keypress
             after?.();
         } else {
             this.lastApplyError = result.error || 'Unknown failure.';
@@ -400,6 +403,7 @@ export class SetupApp {
             this.healthProgressLine = '';
         } finally {
             this.healthRunning = false;
+            this.drawFrame(); // final results visible without a keypress
         }
     }
 
@@ -618,6 +622,7 @@ export class SetupApp {
                     (this.draft.provider !== 'gemini' || Boolean(this.draft.geminiKey) || Boolean(process.env.GEMINI_API_KEY));
             case 'workspace': return Boolean(this.draft.workspacePath);
             case 'memory': return true;
+            case 'voice': return Boolean(this.draft.voiceName);
             case 'security': return Boolean(this.draft.autonomy);
             case 'appearance': return true;
             case 'web': return true;

@@ -281,8 +281,9 @@ export class AgentServer {
             });
         });
 
-        // Agents
-        this.app.get('/api/v1/agents', (req, res) => {
+        // Agents (local specialists). Phase 37 moved MESH device listing to
+        // /api/v1/agents — specialists keep a dedicated path.
+        this.app.get('/api/v1/agents/specialists', (req, res) => {
             AgentRegistry.discover();
             const agents = AgentRegistry.list().map(a => ({
                 id: a.id,
@@ -452,6 +453,9 @@ export class AgentServer {
             }
         });
 
+        // Mesh coordination moved to the standalone server/ package.
+
+
         // Phase 31: Serve Web UI
         const uiPath = path.join(process.cwd(), 'ui/dist');
         this.app.use(express.static(uiPath));
@@ -486,6 +490,7 @@ export class AgentServer {
         // client-supplied session/user/agent ids are never trusted.
         this.wss = new WebSocketServer({ noServer: true });
         this.server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => {
+            if (req.url?.startsWith('/mesh/')) return; // owned by MeshGateway
             if (!req.url || !req.url.startsWith('/ws')) {
                 socket.destroy();
                 return;

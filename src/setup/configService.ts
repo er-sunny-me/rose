@@ -11,6 +11,8 @@ import os from 'os';
 import { Config, AppConfig } from '../config.js';
 import { AppearanceConfig, isValidHexColor } from '../tui/theme.js';
 
+export const VOICE_NAME_OPTIONS = ['Puck', 'Charon', 'Kore', 'Fenrir', 'Aoede'] as const;
+
 export const SETUP_VERSION = 1;
 export const CONFIGURATION_VERSION = 1;
 
@@ -33,6 +35,11 @@ export interface DraftConfig {
     webPort: number;
     logLevel: 'debug' | 'info' | 'warn' | 'error';
     workspacePath: string;
+    // Voice (Gemini Live) preferences
+    voiceName: string;
+    defaultMic: string;
+    screenShare: boolean;
+    screenIntervalMs: number;
     memoryLearning: boolean;
     obsidianVaultPath: string;
     maxEntriesPerType: number;
@@ -60,6 +67,10 @@ export function loadDraft(): DraftConfig {
         webPort: cfg.web?.port ?? cfg.server.port ?? 3000,
         logLevel: cfg.observability.logLevel || 'info',
         workspacePath: cfg.workspace?.path ?? process.cwd(),
+        voiceName: cfg.voice?.voiceName || process.env.VOICE_NAME || 'Puck',
+        defaultMic: cfg.voice?.defaultMic || process.env.DEFAULT_MIC || '',
+        screenShare: cfg.voice?.screenShare ?? (process.env.ENABLE_SCREEN_SHARE === 'true'),
+        screenIntervalMs: cfg.voice?.screenIntervalMs ?? parseInt(process.env.SCREEN_CAPTURE_INTERVAL_MS || '2000', 10),
         memoryLearning: cfg.memory?.learningEnabled !== false,
         obsidianVaultPath: cfg.memory?.obsidianVaultPath ?? '',
         maxEntriesPerType: cfg.memory?.maxEntriesPerType ?? 500,
@@ -92,7 +103,8 @@ export type FieldKey =
     | 'agentName' | 'model' | 'proxyUrl'
     | 'geminiKey' | 'anthropicKey' | 'openaiKey' | 'openrouterKey'
     | 'webHost' | 'webPort'
-    | 'workspacePath' | 'obsidianVaultPath' | 'maxEntriesPerType';
+    | 'workspacePath' | 'obsidianVaultPath' | 'maxEntriesPerType'
+    | 'voiceName' | 'screenIntervalMs';
 
 export function validateField(draft: DraftConfig, key: FieldKey): string | null {
     switch (key) {
@@ -118,6 +130,13 @@ export function validateField(draft: DraftConfig, key: FieldKey): string | null 
         case 'openaiKey':
             if (!draft.openaiKey && draft.provider === 'openai') return 'An OpenAI API key is required for this provider.';
             return null;
+        case 'voiceName':
+            return VOICE_NAME_OPTIONS.includes(draft.voiceName as any) ? null : 'Pick one of the listed voices.';
+        case 'screenIntervalMs': {
+            const n = Number(draft.screenIntervalMs);
+            if (!Number.isInteger(n) || n < 500 || n > 60000) return 'Screen interval must be 500-60000 ms.';
+            return null;
+        }
         case 'openrouterKey':
             if (!draft.openrouterKey && draft.provider === 'openrouter') return 'An OpenRouter API key is required for this provider.';
             return null;
@@ -154,7 +173,7 @@ function validateDirectoryPath(p: string): string | null {
 
 export function validateAll(draft: DraftConfig): Map<FieldKey, string> {
     const keys: FieldKey[] = [
-        'agentName', 'model', 'proxyUrl', 'geminiKey', 'anthropicKey', 'openaiKey', 'openrouterKey',
+        'agentName', 'model', 'proxyUrl', 'geminiKey', 'anthropicKey', 'openaiKey', 'openrouterKey', 'voiceName', 'screenIntervalMs',
         'webHost', 'webPort', 'workspacePath', 'obsidianVaultPath', 'maxEntriesPerType',
     ];
     const errors = new Map<FieldKey, string>();
@@ -413,6 +432,7 @@ export function buildPersistedConfig(draft: DraftConfig): AppConfig {
     cfg.server.port = draft.webPort;
     cfg.observability.logLevel = draft.logLevel;
 
+    cfg.voice = { voiceName: draft.voiceName, defaultMic: draft.defaultMic, screenShare: draft.screenShare, screenIntervalMs: draft.screenIntervalMs };
     cfg.workspace = { ...(cfg.workspace || {}), path: resolveWorkspacePath(draft.workspacePath) };
     cfg.memory = {
         learningEnabled: draft.memoryLearning,

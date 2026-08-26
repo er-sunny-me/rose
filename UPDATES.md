@@ -1,5 +1,30 @@
 # 🎉 Latest Updates
 
+## Phase 37 — Agent Mesh: PC + Server + Native Android Agents
+
+Rose is now a distributed agent platform. Every device runs its own full Agent
+Runtime; the Server only coordinates (identity, pairing, routing, audit) — it
+is NOT a god-agent.
+
+- **Mesh Gateway** on the existing Agent Server (`/mesh/ws`): pairing →
+  challenge auth → capability exchange → presence → delegation relay → revoke.
+- **Pairing**: XXX-XXX human codes (5-min TTL, single-use) + QR payloads
+  (`rose-mesh://pair?...`). Unknown devices never auto-trust.
+- **Identity & Trust**: stable agentId per device, sha256-hashed device secrets,
+  nonce replay-protection, ±30s clock-skew window, instant revocation (4003).
+- **Smart routing**: delegations are filtered by required capabilities as a
+  HARD requirement; no-capable-agent cases fail honestly to the origin.
+- **CLI**: `rose agents list|pair|approve|inspect|revoke|health|task`.
+- **Web Panel**: new Agent Mesh page — topology, pair/approve/revoke, live status.
+- **Native Android app** (`mobile/`, Kotlin + Jetpack Compose): MeshClient with
+  bounded reconnect backoff, Keystore-backed secret storage, Rose-Policy gate
+  (OS permission + policy BOTH required), smart local-vs-PC routing with
+  battery/Wi-Fi awareness, Material-3 Rose theme, notification channels,
+  QR deep-link pairing, offline-first behaviour with UNKNOWN reconciliation.
+- Shared language-neutral protocol: `shared/protocol/rose-mesh-protocol.json`.
+- Tests: `test-phase37-mesh.ts` — live-gateway E2E (pairing → replay → skew →
+  delegation → revoke → reconnect-denied), 19/19 green.
+
 ## Phase 36 — `rose tui` Chat (replaces `rose chat`)
 
 Text chat is now a proper full-screen terminal app built on the Rose TUI engine:

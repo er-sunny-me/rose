@@ -1,0 +1,50 @@
+# Rose Mesh Server + optional auto-HTTPS (Caddy).
+#
+# HTTP only (LAN/testing):
+#   docker compose up -d
+#
+# HTTPS with a domain (production):
+#   DOMAIN=mesh.example.com ACME_EMAIL=you@example.com docker compose --profile tls up -d
+#
+# Requires DNS A record pointing at this server's IP first.
+
+services:
+  rose:
+    build: .
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - ROSE_API_TOKEN=${ROSE_API_TOKEN:?set in .env}
+      - HOST=0.0.0.0
+      - PORT=3000
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - ROSE_MESH_DEBUG=${ROSE_MESH_DEBUG:-0}
+    volumes:
+      - rose-data:/data/.rose
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  caddy:
+    image: caddy:2-alpine
+    profiles: ["tls"]
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - DOMAIN=${DOMAIN:-mesh.example.com}
+      - ACME_EMAIL=${ACME_EMAIL:-you@example.com}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - rose
+
+volumes:
+  rose-data:
+  caddy-data:
+  caddy-config:
