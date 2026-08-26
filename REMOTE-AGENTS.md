@@ -8,7 +8,7 @@ Any machine that runs Rose can join the mesh: Windows, Linux, macOS, Docker.
 npm i -g rose-ai
 rose setup                       # once
 ROSE_SERVER=http://<pc-ip>:3000 rose web   # LAN mode: explicit host binding
-rose agents pair                 # prints code; approve on your main console
+ROSE_API_TOKEN=<mesh-api-password> rose agents connect http://<pc-ip>:3000
 ```
 
 In Docker, publish port 3000 and set `web.host=0.0.0.0` explicitly — the

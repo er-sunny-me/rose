@@ -28,7 +28,15 @@ export interface SecretStore {
     has(key: string): Promise<boolean>;
 }
 
-const SECRET_DIR = () => path.join(process.cwd(), '.rose', 'secrets');
+// Credentials belong to the current OS user, never the process working directory.
+// This keeps global CLI invocations from attempting to write into System32.
+const SECRET_DIR = () => {
+    const envHome = process.env.ROSE_HOME?.trim();
+    const base = envHome && envHome !== 'undefined' && envHome !== 'null'
+        ? envHome
+        : path.join(os.homedir(), '.rose');
+    return path.join(base, 'secrets');
+};
 
 // ─── Windows DPAPI backend ───────────────────────────────────────────────
 
@@ -206,6 +214,7 @@ export class Secrets {
             'openai-api-key': 'OPENAI_API_KEY',
             'github-token': 'GITHUB_TOKEN',
             'google-tokens': 'GOOGLE_CREDENTIALS_PATH_VALUE',
+            'mesh-api-password': 'ROSE_API_TOKEN',
         };
         return map[credential];
     }

@@ -152,7 +152,7 @@ const INITIAL_AGENTS: AgentProfile[] = [
         description: 'Analyze and modify software projects. Read code, write code, run tests, fix bugs.',
         skills: ['coding', 'terminal'],
         capabilities: ['filesystem', 'terminal'],
-        allowedTools: ['execute_command', 'search_memory', 'save_memory'],
+        allowedTools: ['execute_command', 'search_memory', 'save_memory', 'android_click', 'android_swipe', 'android_get_screen_text'],
         accessMode: 'WRITE',
         trustLevel: 'trusted',
         enabled: true,

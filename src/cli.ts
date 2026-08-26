@@ -35,13 +35,42 @@ function savedServerFromFile(): string {
     try { return fsSync.readFileSync(path.join(Config.getGlobalDir(), 'mesh-server.txt'), 'utf8').trim(); } catch { return ''; }
 }
 
+let automaticMeshAgentStarted = false;
+
+/** Start the saved PC mesh agent as part of normal long-running Rose startup. */
+async function startAutomaticMeshAgent(): Promise<void> {
+    if (automaticMeshAgentStarted) return;
+    const serverUrl = process.env.ROSE_SERVER || savedServerFromFile();
+    if (!serverUrl) return;
+
+    const { Secrets } = await import('./security/secrets.js');
+    const password = process.env.ROSE_API_TOKEN
+        || await Secrets.get('mesh-api-password', Config.get().web?.token ?? undefined);
+    if (!password) return;
+
+    automaticMeshAgentStarted = true;
+    const { PcMeshAgent } = await import('./mesh-client.js');
+    const agent = new PcMeshAgent({
+        serverUrl,
+        displayName: 'PC · ' + (os.hostname?.() ?? 'this machine'),
+        capabilities: ['terminal', 'filesystem', 'browser'],
+        executeGoal: async (goal) => {
+            const { SessionManager } = await import('./session.js');
+            const session = SessionManager.createSession('mesh-' + Date.now());
+            return await session.taskExecutor.executeTask(goal, goal);
+        },
+    });
+    void agent.connect();
+}
+
 /** Phase 37: mesh REST base — ROSE_SERVER env > ~/.rose/mesh-server.txt > local AgentServer. */
 function resolveMeshBase(): string {
     const envServer = process.env.ROSE_SERVER;
     let saved = '';
     try { saved = fsSync.readFileSync(path.join(Config.getGlobalDir(), 'mesh-server.txt'), 'utf8').trim(); } catch { /* none */ }
-    const target = envServer || saved || ('http://127.0.0.1:' + (Config.get().server.port || 3000));
-    return target.replace(/\/$/, '') + '/api/v1';
+    const remote = envServer || saved;
+    if (remote) return remote.replace(/\/$/, '') + '/api';
+    return 'http://127.0.0.1:' + (Config.get().server.port || 3000) + '/api/v1';
 }
 
 const args = process.argv.slice(2);
@@ -83,7 +112,7 @@ function printHelp() {
     console.log('  doctor      Run system diagnostics and health checks');
     console.log('  setup       Open the Rose configuration experience (TUI)');
     console.log('  config      Manage configuration (bare `rose config` opens settings)');
-    console.log('  agents      Agent Mesh: list/pair/connect/approve/inspect/revoke/task');
+    console.log('  agents      Agent Mesh: list/connect/inspect/revoke/remove/link/unlink/links/approve-link/capabilities/task');
   console.log('  update      Check for and apply updates to Rose');
     console.log(chalk.gray('  update --check / --dry-run'));
     console.log('  auth        Manage OS-stored credentials (status|set|remove)');
@@ -180,8 +209,64 @@ async function runStatus() {
     console.log(`Memory     ${chalk.green('●')} ${statusObj.memory}`);
     console.log(`Tasks      ${statusObj.tasks} total`);
     console.log(`Web Panel  ${cfg.web?.enabled ? chalk.green('●') : chalk.gray('○')} ${statusObj.web}`);
+
+    try {
+        const { loadIdentity } = await import('./mesh-client.js');
+        const id = loadIdentity();
+        let serverUrl = id?.serverUrl;
+        
+        if (!serverUrl) {
+            const fsSync = await import('fs');
+            const path = await import('path');
+            const serverFile = path.join(Config.getGlobalDir(), 'mesh-server.txt');
+            if (fsSync.existsSync(serverFile)) {
+                serverUrl = fsSync.readFileSync(serverFile, 'utf8').trim();
+            }
+        }
+
+        if (serverUrl) {
+            console.log(chalk.bold.magenta('\nAgent Mesh\n'));
+            console.log(`Server     ${chalk.green('●')} ${serverUrl}`);
+            if (id?.deviceId) {
+                console.log(`Device ID  ● ${id.deviceId}`);
+                if (id.agentId) console.log(`Agent ID   ● ${id.agentId}`);
+            } else {
+                console.log(`Status     ${chalk.yellow('○')} PC not paired yet`);
+            }
+
+            const token = process.env.ROSE_API_TOKEN || Config.get().web?.token;
+            const headers: Record<string, string> = {};
+            if (token) headers['Authorization'] = `Bearer ${token}`;
+
+            try {
+                const res = await fetch(`${serverUrl}/api/agents`, { headers, method: 'GET' });
+                if (res.ok) {
+                    const agents = await res.json();
+                    if (Array.isArray(agents) && agents.length > 0) {
+                        console.log(`\nConnected Devices (${agents.length}):`);
+                        for (const a of agents) {
+                            const me = a.agentId === id?.agentId ? ' (This PC)' : '';
+                            const platform = a.platform ? `[${a.platform}] ` : '';
+                            const dot = a.status === 'online' ? chalk.green('●') : chalk.gray('○');
+                            console.log(`  ${dot} ${platform}${a.displayName || a.agentId}${me}`);
+                        }
+                    } else {
+                        console.log(`\nConnected Devices: (0)`);
+                    }
+                } else {
+                    console.log(`\nConnected Devices: (Failed to fetch - HTTP ${res.status})`);
+                }
+            } catch (e) {
+                console.log(`\nConnected Devices: (Server unreachable)`);
+            }
+        }
+    } catch (e) {
+        // ignore if mesh isn't available
+    }
+
     console.log('');
-    process.exit(0);
+    // Delay exit slightly to allow native fetch sockets to close gracefully on Windows (fixes uv_handle_closing assert)
+    setTimeout(() => process.exit(0), 20);
 }
 
 async function runInteractivePrompt() {
@@ -223,6 +308,7 @@ async function startTuiChat() {
     requireProviderConfigured();
     if (!isQuiet) console.log(chalk.cyan('Starting Rose TUI...'));
     await RuntimeLifecycle.boot();
+    await startAutomaticMeshAgent();
     const { ChatTui } = await import('./tui/chatApp.js');
     const chat = new ChatTui();
     try {
@@ -239,12 +325,19 @@ async function startTuiChat() {
         if (!isQuiet) console.log(chalk.cyan('Launching voice mode...\n'));
         await startVoice();
     }
+    // `/opentui` hands over to the OpenTUI sandbox demo.
+    if ((chat as any).openTuiRequested) {
+        if (!isQuiet) console.log(chalk.cyan('Launching OpenTUI sandbox...\n'));
+        const { runOpenTuiDemo } = await import('./tui/opentui-demo.js');
+        await runOpenTuiDemo();
+    }
 }
 
 async function startVoice() {
     requireProviderConfigured();
     if (!isQuiet) console.log(chalk.cyan('Starting Rose Voice...'));
     await RuntimeLifecycle.boot();
+    await startAutomaticMeshAgent();
     const chat = new GeminiLiveChat();
     await chat.initializeExtensions();
     // Enable AUDIO responses and connect through the voice subsystem
@@ -262,6 +355,7 @@ async function startVoice() {
 async function startServer() {
     if (!isQuiet) console.log(chalk.cyan('Starting Rose Agent Server...'));
     await RuntimeLifecycle.boot();
+    await startAutomaticMeshAgent();
     const server = new AgentServer();
     server.start();
 }
@@ -279,6 +373,7 @@ async function startWeb() {
     const port = cfg.web?.port || cfg.server.port || 3000;
     if (!isQuiet) console.log(chalk.cyan(`Starting Rose Web Control Panel at http://${host}:${port} ...`));
     await RuntimeLifecycle.boot();
+    await startAutomaticMeshAgent();
     const server = new AgentServer();
     server.start();
 
@@ -312,13 +407,28 @@ async function openSettingsDashboard(): Promise<void> {
     }
 }
 
+/** Humanized "how long ago" for mesh presence display. */
+function relTime(ts?: number): string {
+    if (!ts) return 'never';
+    const s = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+    if (s < 60) return `${s}s ago`;
+    const m = Math.floor(s / 60);
+    if (m < 60) return `${m}m ago`;
+    const h = Math.floor(m / 60);
+    if (h < 24) return `${h}h ago`;
+    return `${Math.floor(h / 24)}d ago`;
+}
+
 /** Phase 37 — `rose agents` subcommands against the local Agent Server. */
 async function runAgentsCommand(rest: string[]) {
     const sub = rest[0] || 'list';
     const base = resolveMeshBase();
 
     const api = async (path: string, init?: RequestInit) => {
-        const res = await fetch(`${base}${path}`, { ...init, headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) } });
+        const token = process.env.ROSE_API_TOKEN || Config.get().web?.token;
+        const headers: Record<string, string> = { 'Content-Type': 'application/json', ...(init?.headers as Record<string, string> ?? {}) };
+        if (token) headers.Authorization = `Bearer ${token}`;
+        const res = await fetch(`${base}${path}`, { ...init, headers });
         const body = await res.json().catch(() => ({}));
         return { status: res.status, body } as { status: number; body: any };
     };
@@ -335,6 +445,14 @@ async function runAgentsCommand(rest: string[]) {
             try {
                 fsSync.mkdirSync(path.join(Config.getGlobalDir(), '.'), { recursive: true });
             } catch { /* exists */ }
+            const { Secrets } = await import('./security/secrets.js');
+            const password = process.env.ROSE_API_TOKEN || Config.get().web?.token;
+            if (!password) {
+                console.error(chalk.red('Set ROSE_API_TOKEN to the mesh API password before connecting.'));
+                process.exitCode = 1;
+                return;
+            }
+            await Secrets.set('mesh-api-password', password);
             fsSync.writeFileSync(path.join(Config.getGlobalDir(), 'mesh-server.txt'), serverUrl);
 
             await RuntimeLifecycle.boot();
@@ -356,26 +474,6 @@ async function runAgentsCommand(rest: string[]) {
             await new Promise(() => {}); // connector handles Ctrl+C via SIGINT default? ensure below
             break;
         }
-        case 'pair': {
-            const r = await api('/agents/pair', { method: 'POST' });
-            if (r.status !== 200) { console.error(chalk.red('✗ Server unreachable — start it with `rose web` first.')); process.exitCode = 1; return; }
-            console.log(chalk.bold.magenta('\n🤝 Pair a new Agent\n'));
-            console.log(`  Pairing Code : ${chalk.bold.cyan(r.body.code)}`);
-            console.log(`  Expires      : ${new Date(r.body.expiresAt).toLocaleTimeString()}`);
-            console.log(chalk.gray('\n  QR payload (mobile app scan):'));
-            console.log(chalk.gray(`  ${r.body.qr}`));
-            console.log(chalk.yellow(`\n  Approve with: rose agents approve ${r.body.code}`));
-            console.log(chalk.gray('  The token is single-use and expires automatically.\n'));
-            return;
-        }
-        case 'approve': {
-            const code = rest[1];
-            if (!code) { console.error(chalk.red('Usage: rose agents approve <code>')); process.exitCode = 1; return; }
-            const r = await api('/agents/pair/approve', { method: 'POST', body: JSON.stringify({ code }) });
-            if (r.status !== 200) { console.error(chalk.red('✗ ' + (r.body.error || 'approval failed'))); process.exitCode = 1; return; }
-            console.log(chalk.green(`✓ Approved ${code}. Waiting for the device to finish pairing…`));
-            return;
-        }
         case 'inspect': {
             const id = rest[1];
             if (!id) { console.error(chalk.red('Usage: rose agents inspect <agentId>')); process.exitCode = 1; return; }
@@ -395,6 +493,74 @@ async function runAgentsCommand(rest: string[]) {
             const r = await api(`/agents/${encodeURIComponent(id)}/revoke`, { method: 'POST' });
             if (r.status !== 200) { console.error(chalk.red('✗ ' + (r.body.error || 'revoke failed'))); process.exitCode = 1; return; }
             console.log(chalk.green(`✓ Revoked ${id}. The device must pair again.`));
+            return;
+        }
+        case 'remove':
+        case 'forget': {
+            const id = rest[1];
+            if (!id) { console.error(chalk.red('Usage: rose agents remove <agentId>')); process.exitCode = 1; return; }
+            const r = await api(`/agents/${encodeURIComponent(id)}`, { method: 'DELETE' });
+            if (r.status !== 200) { console.error(chalk.red('✗ ' + (r.body.error || 'remove failed'))); process.exitCode = 1; return; }
+            console.log(chalk.green(`✓ Removed ${id} from the mesh registry.`));
+            return;
+        }
+        case 'links': {
+            const r = await api('/links');
+            if (r.status !== 200) { console.error(chalk.red('✗ Server unreachable or old version.')); process.exitCode = 1; return; }
+            console.log(chalk.bold.cyan(`\n🔗 Agent Links (${r.body.activeLinks} active)\n`));
+            for (const l of r.body.links ?? []) {
+                console.log(`  ${l.state === 'linked' ? chalk.green('●') : l.state === 'pending' ? chalk.yellow('○') : chalk.gray('✕')} ${l.state.padEnd(9)} ${l.a} ↔ ${l.b}   ${chalk.gray(l.linkId)}`);
+            }
+            if ((r.body.links ?? []).length === 0) console.log(chalk.gray('  No links yet — use: rose agents link <agentA> <agentB>'));
+            console.log();
+            return;
+        }
+        case 'link': {
+            // Admin-approved A↔B link via the trusted console.
+            const a = rest[1], b = rest[2];
+            if (!a || !b) { console.error(chalk.red('Usage: rose agents link <agentIdA> <agentIdB>')); process.exitCode = 1; return; }
+            const r = await api('/agents/link', { method: 'POST', body: JSON.stringify({ a, b }) });
+            if (r.status !== 200) { console.error(chalk.red('✗ ' + (r.body.error || 'link failed'))); process.exitCode = 1; return; }
+            console.log(chalk.green(`✓ Linked ${a} ↔ ${b} (${r.body.link?.linkId})`));
+            return;
+        }
+        case 'unlink': {
+            const a = rest[1], b = rest[2];
+            if (!a || !b) { console.error(chalk.red('Usage: rose agents unlink <agentIdA> <agentIdB>')); process.exitCode = 1; return; }
+            const r = await api('/agents/unlink', { method: 'POST', body: JSON.stringify({ a, b }) });
+            if (r.status !== 200) { console.error(chalk.red('✗ ' + (r.body.error || 'unlink failed'))); process.exitCode = 1; return; }
+            console.log(chalk.green(`✓ Unlinked ${a} ↔ ${b}`));
+            return;
+        }
+        case 'approve-link':
+        case 'reject-link': {
+            const linkId = rest[1];
+            if (!linkId) { console.error(chalk.red(`Usage: rose agents ${sub} <linkId>`)); process.exitCode = 1; return; }
+            const r = await api(`/links/${encodeURIComponent(linkId)}/${sub === 'approve-link' ? 'approve' : 'reject'}`, { method: 'POST' });
+            if (r.status !== 200) { console.error(chalk.red('✗ ' + (r.body.error || 'failed'))); process.exitCode = 1; return; }
+            console.log(chalk.green(`✓ Link ${linkId} → ${r.body.link?.state}`));
+            return;
+        }
+        case 'capabilities': {
+            const id = rest[1];
+            if (!id) {
+                // List every agent's capability summary.
+                const r = await api('/mesh');
+                for (const a of r.body?.agents ?? []) {
+                    console.log(`${a.displayName.padEnd(24)} caps=${(a.capabilities ?? []).length} tools=${(a.tools ?? []).length} mcp=${a.mcp ? 'yes' : 'no '} browser=${a.browser ? 'yes' : 'no '} ${a.agentId}`);
+                }
+                return;
+            }
+            const r = await api(`/agents/${encodeURIComponent(id)}/capabilities`);
+            if (r.status !== 200) { console.error(chalk.red('✗ not found')); process.exitCode = 1; return; }
+            const c = r.body;
+            console.log(chalk.bold.cyan(`\n🧩 ${c.agentId} [${c.platform}]`));
+            console.log(`  Capabilities : ${c.capabilities.join(', ') || '(none)'}`);
+            console.log(`  Tools (${(c.tools ?? []).length})    : ${(c.tools ?? []).slice(0, 12).join(', ')}${(c.tools ?? []).length > 12 ? ', …' : ''}`);
+            console.log(`  Skills       : ${(c.skills ?? []).join(', ') || '(none)'}`);
+            console.log(`  Providers    : ${(c.providers ?? []).join(', ') || '(none)'}`);
+            console.log(`  Memory       : ${(c.memoryCapabilities ?? []).join(', ')}`);
+            console.log(`  Browser/MCP  : ${c.browser ? 'browser ✓' : 'no browser'} / ${c.mcp ? 'mcp ✓' : 'no mcp'}\n`);
             return;
         }
         case 'health': {
@@ -421,9 +587,9 @@ async function runAgentsCommand(rest: string[]) {
             console.log(`  Agents: ${m.total} total · ${chalk.green(m.online + ' online')} · ${chalk.yellow(m.degraded + ' degraded')} · ${m.offline} offline`);
             for (const a of m.agents) {
                 const dot = a.status === 'online' ? chalk.green('●') : a.status === 'degraded' ? chalk.yellow('⚠') : chalk.gray('○');
-                console.log(`  ${dot} ${a.displayName.padEnd(24)} ${a.platform.padEnd(10)} ${a.trust.padEnd(9)} ${a.agentId}`);
+                console.log(`  ${dot} ${a.displayName.padEnd(24)} ${a.platform.padEnd(10)} ${a.trust.padEnd(9)} ${relTime(a.lastSeen).padEnd(9)} ${a.agentId}`);
             }
-            console.log(chalk.gray('\n  pair / approve / inspect / revoke / health / task — see rose agents --help\n'));
+            console.log(chalk.gray('\n  connect / inspect / revoke / remove / health / task — API-password authentication required\n'));
             return;
         }
     }
@@ -719,6 +885,80 @@ async function main() {
                 const { startMcpServer } = await import('./mcp-server.js');
                 await startMcpServer();
                 break; // serve until stdin closes
+            }
+            case 'tools':
+            case 'capabilities':
+            case 'workflows': {
+                // Phase 39 — Tool Intelligence CLI (§49/§50/§89).
+                const { toolIntelligence, WORKFLOWS } = await import('./intelligence/tool-intelligence.js');
+                const json = args.includes('--json');
+                const rest39 = args.slice(1).filter(a => a !== '--json');
+                if (command === 'capabilities') {
+                    const caps = await toolIntelligence.capabilities(rest39[0]);
+                    if (json) { console.log(JSON.stringify(caps, null, 2)); break; }
+                    console.log(chalk.bold.cyan(`\n🧩 Capabilities (${caps.length})\n`));
+                    for (const c of caps) {
+                        const mark = c.status === 'Ready' ? chalk.green('✓') : c.status === 'Needs setup' ? chalk.yellow('~') : '✕';
+                        console.log(`  ${mark} ${c.id.padEnd(24)} ${c.status.padEnd(12)} risk=${c.risk}  ${chalk.gray(c.tools.join(', ').slice(0, 60))}`);
+                    }
+                    console.log();
+                    break;
+                }
+                if (command === 'workflows') {
+                    if (json) { console.log(JSON.stringify(WORKFLOWS, null, 2)); break; }
+                    console.log(chalk.bold.cyan(`\n🔀 Workflows (${WORKFLOWS.length})\n`));
+                    for (const w of WORKFLOWS) {
+                        console.log(`  • ${w.name} (${w.id})`);
+                        for (const s of w.steps) console.log(`      ${s.optional ? '(optional) ' : ''}${s.tool} — ${s.purpose}`);
+                    }
+                    console.log();
+                    break;
+                }
+                const sub39 = rest39[0] ?? '';
+                if (sub39 === 'search') {
+                    const q = rest39.slice(1).join(' ');
+                    const r = await toolIntelligence.discover({ query: q, topK: 8 });
+                    if (json) { console.log(JSON.stringify(r, null, 2)); break; }
+                    console.log(chalk.bold.cyan(`\n🔍 Discovery for "${q}" (intent: ${r.intent.domain})\n`));
+                    for (const c of r.candidates) {
+                        const gate = !c.eligible ? chalk.red(' [blocked: ' + c.ineligibleReason + ']') : c.prerequisitesMet ? '' : chalk.yellow(` [missing: ${c.missingPrerequisites.join(',')}]`);
+                        console.log(`  ${c.local ? '▪' : '🌐'} ${String(c.score).padStart(3)}  ${c.toolName.padEnd(28)} ${c.capability.padEnd(18)} risk=${c.risk} health=${c.health}${gate}`);
+                    }
+                    if (r.workflows.length) console.log(chalk.magenta(`  workflows: ${r.workflows.map(w => w.id).join(', ')}`));
+                    if (r.honestFallback) console.log(chalk.yellow(`  ⚠ ${r.honestFallback}`));
+                    console.log();
+                    break;
+                }
+                if (sub39 === 'inspect') {
+                    const all = await toolIntelligence.all();
+                    const m = all.find(t => t.name.toLowerCase() === rest39[1]?.toLowerCase());
+                    if (!m) { console.error(chalk.red('✗ unknown tool')); process.exitCode = 1; break; }
+                    if (json) { console.log(JSON.stringify(m, null, 2)); break; }
+                    console.log(chalk.bold.cyan(`\n🔧 ${m.name}\n`));
+                    console.log(`  Description : ${m.description}`);
+                    console.log(`  Capability  : ${m.capabilities.join(', ')}`);
+                    console.log(`  Use when    : ${(m.useWhen ?? []).join('; ') || '—'}`);
+                    console.log(`  Avoid when  : ${(m.avoidWhen ?? []).join('; ') || '—'}`);
+                    console.log(`  Prereqs     : ${(m.prerequisites ?? []).join(', ') || 'none'}`);
+                    console.log(`  Risk        : ${m.risk}   Side effects: ${m.sideEffects ? m.sideEffectClass : 'read-only'}   Approval hint: ${m.requiresApproval ? 'yes' : 'no'}`);
+                    console.log(`  Source      : ${m.source}`);
+                    if ((m.examples ?? []).length) console.log(`  Example     : ${m.examples![0]}`);
+                    console.log();
+                    break;
+                }
+                if (sub39 === 'refresh') {
+                    const n = await toolIntelligence.buildIndex(true);
+                    console.log(chalk.green(`✓ Re-indexed ${n} tools.`));
+                    break;
+                }
+                {
+                    const all = await toolIntelligence.all();
+                    if (json) { console.log(JSON.stringify(all, null, 2)); break; }
+                    console.log(chalk.bold.cyan(`\n🔧 Tools (${all.length})\n`));
+                    for (const t of all) console.log(`  ${t.risk === 'low' ? '·' : t.risk === 'critical' ? '!' : '+'} ${t.name.padEnd(30)} ${t.capabilities.join(',').padEnd(26)} ${t.source}`);
+                    console.log(chalk.gray('\n  search / inspect / refresh subcommands; --json supported\n'));
+                }
+                break;
             }
             default:
                 console.error(chalk.red(`\n? Error: Unknown command '${command}'`));

@@ -30,13 +30,12 @@ cd mobile
 Release builds expect signing config from CI secrets / local.properties —
 keystores are never committed (§122).
 
-## Pairing flow
+## Connection flow
 
-1. On PC: `rose web`, then `rose agents pair` (or Web Panel → Agent Mesh → Pair).
-2. Scan the QR with this app (deep link `rose-mesh://pair?...`) or paste host+token.
-3. Approve the code on the trusted console.
-4. App receives its `agentId` + one-time `deviceSecret` → stored Keystore-encrypted.
-5. Status chip turns **Connected**.
+1. Enter the HTTPS mesh server URL, API password, and device name.
+2. Tap **Connect with API Password**. The password travels only in the HTTPS
+   WebSocket Authorization header and is not stored by the app.
+3. The app persists a random device ID, so reconnects retain the same agent.
 
 ## Offline behaviour
 

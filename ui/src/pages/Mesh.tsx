@@ -18,7 +18,17 @@ interface MeshSummary {
   online: number;
   degraded: number;
   offline: number;
+  activeLinks?: number;
+  metrics?: Record<string, number>;
   agents: MeshAgent[];
+}
+
+interface AgentLink {
+  linkId: string;
+  a: string;
+  b: string;
+  state: 'pending' | 'linked' | 'rejected';
+  requestedBy?: string;
 }
 
 const API = '/api/v1';
@@ -39,12 +49,18 @@ function statusDot(status: string): { color: string; label: string } {
 
 export default function Mesh() {
   const [summary, setSummary] = useState<MeshSummary | null>(null);
+  const [links, setLinks] = useState<AgentLink[]>([]);
   const [pairing, setPairing] = useState<{ code: string; qr: string; expiresAt: number } | null>(null);
   const [busy, setBusy] = useState(false);
+  const [linkA, setLinkA] = useState('');
+  const [linkB, setLinkB] = useState('');
 
   const refresh = useCallback(async () => {
     const s = await call('/mesh');
-    if (s && typeof s.total === 'number') setSummary(s);
+    if (s && typeof s.total === 'number') {
+      setSummary(s);
+      setLinks(s.links ?? []);
+    }
   }, []);
 
   useEffect(() => {
@@ -67,6 +83,19 @@ export default function Mesh() {
 
   const revoke = async (agentId: string) => {
     await call(`/agents/${encodeURIComponent(agentId)}/revoke`, { method: 'POST' });
+    void refresh();
+  };
+
+  const linkAgents = async () => {
+    if (!linkA || !linkB || linkA === linkB) return;
+    setBusy(true);
+    await call('/agents/link', { method: 'POST', body: JSON.stringify({ a: linkA, b: linkB }) });
+    setBusy(false);
+    void refresh();
+  };
+
+  const unlinkAgents = async (a: string, b: string) => {
+    await call('/agents/unlink', { method: 'POST', body: JSON.stringify({ a, b }) });
     void refresh();
   };
 
@@ -112,6 +141,37 @@ export default function Mesh() {
      ┌───────┴────────┐
 ${(summary.agents || []).map(a => `     ● ${a.displayName.padEnd(14)} (${a.platform})`).join('\n')}`}
             </pre>
+          </div>
+
+          <div style={{ ...card('#1d2430'), marginTop: 0 }}>
+            <div style={{ fontWeight: 700, marginBottom: 8 }}>🔗 Agent Links ({summary.activeLinks ?? links.filter(l => l.state === 'linked').length} active)</div>
+            {(links ?? []).map(l => (
+              <div key={l.linkId} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '4px 0', fontSize: '.9rem' }}>
+                <span>{l.state === 'linked' ? '🟢' : l.state === 'pending' ? '🟡' : '⚪'} {l.state}</span>
+                <code style={{ fontSize: '.8rem' }}>{l.a}</code> ↔ <code style={{ fontSize: '.8rem' }}>{l.b}</code>
+                {l.state !== 'pending' && (
+                  <button onClick={() => unlinkAgents(l.a, l.b)} style={{ ...btnGhost, padding: '2px 8px', marginLeft: 'auto' }}>
+                    Unlink
+                  </button>
+                )}
+              </div>
+            ))}
+            {links.length === 0 && <div style={{ opacity: .6, fontSize: '.85rem' }}>No agent-to-agent links yet.</div>}
+            <div style={{ display: 'flex', gap: 8, marginTop: 12, alignItems: 'center' }}>
+              <select value={linkA} onChange={e => setLinkA(e.target.value)} style={selectStyle}>
+                <option value="">Agent A…</option>
+                {(summary.agents || []).map(a => <option key={a.agentId} value={a.agentId}>{a.displayName} ({a.platform})</option>)}
+              </select>
+              ↔
+              <select value={linkB} onChange={e => setLinkB(e.target.value)} style={selectStyle}>
+                <option value="">Agent B…</option>
+                {(summary.agents || []).map(a => a.agentId !== linkA && <option key={a.agentId} value={a.agentId}>{a.displayName} ({a.platform})</option>)}
+              </select>
+              <button onClick={linkAgents} disabled={busy || !linkA || !linkB} style={btnPrimary}>Link</button>
+            </div>
+            <div style={{ opacity: .55, fontSize: '.78rem', marginTop: 6 }}>
+              Linked agents can delegate tasks to each other and share authorized memory. Default is restrictive — nothing is shared without an explicit link.
+            </div>
           </div>
 
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
@@ -189,4 +249,11 @@ const btnGhost: React.CSSProperties = {
   background: 'transparent', color: 'inherit',
   padding: '8px 12px', borderRadius: 8,
   border: '1px solid rgba(128,128,128,.35)',
+};
+
+const selectStyle: React.CSSProperties = {
+  background: 'rgba(128,128,128,.08)', color: 'inherit',
+  padding: '7px 10px', borderRadius: 8,
+  border: '1px solid rgba(128,128,128,.35)',
+  maxWidth: 220,
 };

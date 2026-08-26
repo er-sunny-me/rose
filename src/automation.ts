@@ -5,6 +5,7 @@ import chalk from 'chalk';
 import { v4 as uuidv4 } from 'uuid';
 import { Telemetry } from './telemetry.js';
 import { SecurityEngine, AutonomyMode } from './security.js';
+import { roseDataPath } from './storage-paths.js';
 
 export interface AutomationTrigger {
     type: 'cron' | 'condition';
@@ -48,7 +49,7 @@ export class AutomationEngine {
     private static automations: Map<string, Automation> = new Map();
     private static activeTasks: Map<string, cron.ScheduledTask> = new Map();
     private static runningAutomations: Set<string> = new Set(); // For Reentrancy protection
-    private static dataPath = path.join(process.cwd(), 'data', 'automations.json');
+    private static dataPath = roseDataPath('data', 'automations.json');
     public static executeTaskHook: ((goal: string) => Promise<any>) | null = null;
 
     public static initialize() {

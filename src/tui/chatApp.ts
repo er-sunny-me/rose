@@ -241,9 +241,9 @@ export class ChatTui {
     private spinnerTimer: NodeJS.Timeout | null = null;
     private quitResolve: (() => void) | null = null;
     /** Set by /exit — the key loop checks it after each draw. */
-    quitRequested = false;
-    /** Set by /voice — CLI launches the voice app after clean TUI exit. */
-    voiceRequested = false;
+    public quitRequested = false;
+    public voiceRequested = false;
+    public openTuiRequested = false;
 
     constructor(opts: { responder?: ChatResponder; greeting?: string } = {}) {
         this.theme = new Theme(Config.get().appearance);
@@ -503,6 +503,7 @@ export class ChatTui {
                     '  /model           which model is running (tier, context, health)',
                     '  /models          same as /model — active model details',
                     '  /voice           switch to voice-to-voice mode (mic + Live)',
+                    '  /opentui         launch the OpenTUI sandbox demo',
                     '  /clear           clear the conversation',
                     '  /exit  /quit     leave the TUI (Esc also works)',
                     '',
@@ -552,6 +553,11 @@ export class ChatTui {
                 // Real handoff: TUI cleanly exits and the CLI launches voice mode.
                 this.transcript.push({ role: 'sys', text: '🎙️  Switching to voice mode… (terminal will hand over)' });
                 this.voiceRequested = true;
+                this.quitRequested = true;
+                break;
+            case '/opentui':
+                this.transcript.push({ role: 'sys', text: 'Launching OpenTUI sandbox… (terminal will hand over)' });
+                this.openTuiRequested = true;
                 this.quitRequested = true;
                 break;
             case '/clear':

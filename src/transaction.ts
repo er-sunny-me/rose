@@ -7,6 +7,7 @@ import chalk from 'chalk';
 import { Telemetry } from './telemetry.js';
 import { EventStore } from './runtime/events.js';
 import { TransactionProjection } from './runtime/projections.js';
+import { roseDataPath } from './storage-paths.js';
 
 const execPromise = promisify(exec);
 
@@ -52,7 +53,7 @@ export interface AgentTransaction {
 
 export class TransactionManager {
     private static transactions: Map<string, AgentTransaction> = new Map();
-    private static BASE_DIR = path.join(process.cwd(), '.gemini', 'transactions');
+    private static BASE_DIR = roseDataPath('transactions');
 
     public static async init() {
         if (!fs.existsSync(this.BASE_DIR)) {
@@ -205,9 +206,22 @@ export class TransactionManager {
                     // if target didn't exist before, we should delete it
                     try {
                         if (fs.existsSync(cp.target)) {
-                            fs.unlinkSync(cp.target);
-                            console.log(chalk.gray(`  Deleted newly created file: ${cp.target}`));
-                            successCount++;
+                            // AV/indexers can hold brief locks on fresh files.
+                            let deleted = false;
+                            for (let attempt = 0; attempt < 3 && !deleted; attempt++) {
+                                try {
+                                    fs.unlinkSync(cp.target);
+                                    deleted = true;
+                                } catch {
+                                    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+                                }
+                            }
+                            if (deleted) {
+                                console.log(chalk.gray(`  Deleted newly created file: ${cp.target}`));
+                                successCount++;
+                            } else {
+                                failCount++;
+                            }
                         }
                     } catch (e: any) {
                          failCount++;

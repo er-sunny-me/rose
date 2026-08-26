@@ -42,7 +42,10 @@ export interface MeshDevice {
 }
 
 export function dataDir(): string {
-    const dir = process.env.ROSE_HOME || path.join(os.homedir(), '.rose-mesh');
+    const envHome = process.env.ROSE_HOME?.trim();
+    const dir = envHome && envHome !== 'undefined' && envHome !== 'null'
+        ? envHome
+        : path.join(os.homedir(), '.rose-mesh');
     fs.mkdirSync(dir, { recursive: true });
     return dir;
 }
@@ -172,6 +175,24 @@ export class DeviceRegistry {
     }
 
     static revoke(agentId: string): boolean { return this.setTrust(agentId, 'revoked'); }
+
+    /** Permanently delete a device entry from the on-disk registry. */
+    static remove(agentId: string): boolean {
+        const ok = this.load().delete(agentId);
+        if (ok) this.save();
+        return ok;
+    }
+
+    /** Registry hygiene — drop devices unseen for longer than maxAgeMs. */
+    static prune(maxAgeMs: number, keep: Set<string> = new Set()): number {
+        const cutoff = Date.now() - maxAgeMs;
+        let removed = 0;
+        for (const [id, d] of this.load()) {
+            if (d.lastSeen < cutoff && !keep.has(id)) { this.load().delete(id); removed++; }
+        }
+        if (removed) this.save();
+        return removed;
+    }
 
     static touchPresence(agentId: string, patch?: Partial<MeshDevice>): void {
         const d = this.get(agentId);

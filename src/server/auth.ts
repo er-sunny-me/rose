@@ -62,11 +62,24 @@ export class AuthService {
         }
 
         this.token = this.generateToken();
-        try {
-            fs.mkdirSync(path.dirname(file), { recursive: true });
-            fs.writeFileSync(file, this.token, { encoding: 'utf-8', mode: 0o600 });
-        } catch {
-            /* read-only FS: token stays in memory for this run */
+        let lastErr: any = null;
+        for (let attempt = 0; attempt < 3; attempt++) {
+            try {
+                fs.mkdirSync(path.dirname(file), { recursive: true });
+                // First attempt keeps 0600; retries drop mode (some FS/AV
+                // stacks reject the options object transiently on Windows).
+                if (attempt === 0) fs.writeFileSync(file, this.token, { encoding: 'utf-8', mode: 0o600 });
+                else fs.writeFileSync(file, this.token, 'utf-8');
+                lastErr = null;
+                if (process.env.VITEST_AUTH_DEBUG) console.log('[AUTHDBG] wrote to', file);
+                break;
+            } catch (e: any) {
+                lastErr = e;
+            }
+        }
+        if (lastErr) {
+            // Visible, but never fatal and NEVER prints the token itself.
+            console.error('[AUTH] Could not persist API token to disk:', lastErr.message);
         }
         return this.token;
     }

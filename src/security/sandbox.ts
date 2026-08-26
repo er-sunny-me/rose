@@ -92,6 +92,18 @@ const BASE_ALLOWLIST = new Set([
     'ls', 'cat', 'head', 'tail', 'wc', 'grep', 'find', 'which', 'whoami',
     'type', 'where', 'tasklist', 'ipconfig', 'ping', 'netstat', 'systeminfo',
     'pwd', 'tree', 'hostname', 'date',
+    // Windows system utilities (read-only / informational)
+    'wmic', 'powershell', 'pwsh', 'cmd',
+    'sc', 'net', 'nslookup', 'tracert', 'pathping', 'arp',
+    'fsutil', 'driverquery', 'getmac', 'vol', 'ver',
+    'certutil', 'clip', 'choice', 'timeout', 'mode', 'title',
+    // cross-platform utilities
+    'curl', 'wget', 'tar', 'unzip', 'zip', 'ssh', 'scp',
+    'docker', 'docker-compose', 'kubectl',
+    'code', 'notepad', 'start', 'open', 'xdg-open',
+    // file management
+    'cp', 'mv', 'rm', 'mkdir', 'touch', 'chmod', 'chown',
+    'robocopy', 'xcopy', 'attrib', 'icacls',
 ]);
 
 /** Windows cmd.exe builtins — require shell mode (elevated risk path). */
@@ -334,10 +346,24 @@ export function evaluateCommand(rawCommand: string, options: SandboxOptions = {}
         isBuiltin,
     };
 
-    // Layer 2b: shell operators force the elevated shell class
-    if (operators.length > 0 && !operators.every(o => o === '>' || o === '>>')) {
-        // Pipes/chains/substitution are rejected outright: too easy to smuggle.
-        return finalize('DENY', 'denied', `shell operators not permitted (${operators.join(', ')})`, parsed);
+    // Layer 2b: shell operators — allow pipes and chaining (|, &&, ||) when
+    // the lead executable is allowlisted. Only command-substitution ($()) and
+    // background (&) remain denied since they enable hidden process spawning.
+    const dangerousOps = operators.filter(o => o === 'command-substitution' || o === '&');
+    if (dangerousOps.length > 0) {
+        return finalize('DENY', 'denied', `shell operators not permitted (${dangerousOps.join(', ')})`, parsed);
+    }
+
+    // ── Full Access mode (default: ON) ──
+    // When security.fullAccess is true, skip allowlist and jail — only the
+    // denylist (Layer 1) protects against truly dangerous commands.
+    const fullAccess = Config.get().security?.fullAccess !== false;
+    if (fullAccess) {
+        // Still deny sudo/runas even in full-access mode
+        if (executableBase === 'sudo' || executableBase === 'runas') {
+            return finalize('DENY', 'denied', 'privilege escalation commands are always denied', parsed);
+        }
+        return finalize('ALLOW', parsed.isBuiltin ? 'shell' : 'safe', 'full-access mode (denylist passed)', parsed);
     }
 
     // Layer 3: allowlist (plus the narrow URL-opener exception)
@@ -456,7 +482,8 @@ export async function executeApproved(verdict: SandboxVerdict): Promise<SandboxR
 
     let file: string;
     let args: string[];
-    if (parsed.isBuiltin) {
+    const needsShell = parsed.isBuiltin || parsed.operators.length > 0;
+    if (needsShell) {
         file = isWin ? (process.env.COMSPEC || 'cmd.exe') : '/bin/sh';
         args = isWin ? ['/d', '/s', '/c', verdict.dryRunReport.command] : ['-c', verdict.dryRunReport.command];
     } else {
@@ -476,7 +503,7 @@ export async function executeApproved(verdict: SandboxVerdict): Promise<SandboxR
         const child = spawn(file, args, {
             cwd: verdict.cwd,
             env: verdict.childEnv,
-            shell: false,
+            shell: needsShell,
             windowsHide: true,
             detached: !isWin, // own process group on POSIX for tree-kill
         });

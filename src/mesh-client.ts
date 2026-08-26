@@ -15,7 +15,6 @@ import path from 'path';
 import os from 'os';
 import { WebSocket } from 'ws';
 import chalk from 'chalk';
-import qrcode from 'qrcode-terminal';
 import { Config } from './config.js';
 
 export const PROTOCOL_VERSION = 1;
@@ -36,9 +35,11 @@ interface DeviceIdentity {
 }
 
 function identityFile(): string {
-    return process.env.ROSE_HOME
-        ? path.join(process.env.ROSE_HOME, 'mesh-device.json')
-        : path.join(os.homedir(), '.rose', 'mesh-device.json');
+    const envHome = process.env.ROSE_HOME?.trim();
+    const base = envHome && envHome !== 'undefined' && envHome !== 'null'
+        ? envHome
+        : path.join(os.homedir(), '.rose');
+    return path.join(base, 'mesh-device.json');
 }
 
 export function loadIdentity(): DeviceIdentity | null {
@@ -63,81 +64,91 @@ export class PcMeshAgent {
     private ws: WebSocket | null = null;
     private attempts = 0;
     private stopped = false;
+    private lastManifest: import('./mesh-manifest.js').MeshManifest | null = null;
+    private pingTimer: NodeJS.Timeout | null = null;
 
     constructor(private opts: ConnectorOptions) {}
 
-    /**
-     * Full connect flow:
-     *   no identity  → POST /agents/pair → wait for human approve → WS pair
-     *   identity     → WS challenge auth directly
-     */
     async connect(): Promise<void> {
         let id = loadIdentity();
-        if (!id || id.serverUrl !== this.opts.serverUrl || !id.deviceSecret) {
-            await this.pair();
-            id = loadIdentity()!;
+        const { Secrets } = await import('./security/secrets.js');
+        const secretToken = process.env.ROSE_API_TOKEN
+            || await Secrets.get('mesh-api-password', Config.get().web?.token ?? undefined);
+        if (!secretToken) {
+            console.error(chalk.red('Mesh API password is not configured. Run `rose agents connect <server-url>` once with ROSE_API_TOKEN set.'));
+            return;
         }
-        await this.openSocket(this.opts.serverUrl, id);
+
+        if (!id || id.serverUrl !== this.opts.serverUrl) {
+            id = { serverUrl: this.opts.serverUrl, deviceId: crypto.randomBytes(32).toString('hex') };
+            saveIdentity(id);
+        }
+        // Phase 38 §10/§46: manifest is detected from the REAL runtime, never hardcoded.
+        const { detectManifest } = await import('./mesh-manifest.js');
+        this.lastManifest = await detectManifest();
+        await this.openSocket(this.opts.serverUrl, id, secretToken);
     }
 
-    /** Step 1: request + auto-wait-for-approval pairing over REST. */
-    private async pair(): Promise<void> {
-        const token = process.env.ROSE_API_TOKEN || Config.get().web?.token;
-        const headers: Record<string, string> = {};
-        if (token) headers['Authorization'] = `Bearer ${token}`;
-
-        const res = await fetch(`${this.opts.serverUrl}/api/agents/pair`, { 
-            method: 'POST',
-            headers
+    /** Re-detect the runtime and push a capability update (§12/§48). */
+    async refreshCapabilities(): Promise<void> {
+        const { detectManifest } = await import('./mesh-manifest.js');
+        const next = await detectManifest();
+        const prev = this.lastManifest;
+        this.lastManifest = next;
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+        if (prev && prev.capabilityVersion === next.capabilityVersion) return; // avoid needless rescans
+        this.sendNow({
+            type: 'agent.capabilities.update',
+            capabilities: next.capabilities,
+            tools: next.tools,
+            skills: next.skills,
+            providers: next.providers,
+            memoryCapabilities: next.memoryCapabilities,
+            browser: next.browser,
+            mcp: next.mcp,
+            capabilityVersion: next.capabilityVersion,
+            configVersion: next.configVersion,
         });
-        if (!res.ok) throw new Error(`Pairing request failed: ${res.status} — is the server running?`);
-        const p: any = await res.json();
-
-        console.log(chalk.cyan(`\n🤝 Pairing code: ${p.code}  (expires ${new Date(p.expiresAt).toLocaleTimeString()})`));
-        console.log(chalk.gray('Approve it with: rose agents approve ' + p.code));
-        console.log(chalk.gray('QR payload    : ' + p.qr));
-        qrcode.generate(p.qr, { small: true });
-
-        // Auto-approve when THIS console owns the server (same-machine flow):
-        try {
-            const adminRes = await fetch(`${this.opts.serverUrl}/api/agents/pair/approve`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', ...headers },
-                body: JSON.stringify({ code: p.code, displayName: this.opts.displayName }),
-            });
-            if (adminRes.ok) console.log(chalk.green('✓ Auto-approved (this console manages the server).'));
-        } catch { /* remote server → manual approval needed */ }
-
-        // Poll until the device completes the WS pairing (token consumed).
-        const deadline = Date.now() + 5 * 60_000;
-        while (Date.now() < deadline) {
-            await new Promise(r => setTimeout(r, 2000));
-            const id2 = loadIdentity();
-            if (id2?.deviceSecret && id2.agentId) {
-                console.log(chalk.green('✓ Paired as ' + id2.agentId));
-                return;
-            }
-        }
-        throw new Error('Pairing not completed within 5 minutes.');
+        console.log(chalk.cyan(`🔄 [MESH] Capabilities updated → v${next.capabilityVersion} (${next.capabilities.length} caps)`));
     }
 
-    private async openSocket(serverUrl: string, id: DeviceIdentity): Promise<void> {
-        const wsUrl = serverUrl.replace(/^http/, 'ws') +
-            `/mesh/ws?token=mesh.${id.agentId ?? ''}`;
-        const ws = new WebSocket(wsUrl);
+    private buildHello(id: DeviceIdentity): Record<string, unknown> {
+        const m = this.lastManifest;
+        return {
+            type: 'hello', v: PROTOCOL_VERSION,
+            nonce: crypto.randomBytes(8).toString('hex'), ts: Date.now(),
+            deviceId: id.deviceId,
+            displayName: this.opts.displayName ?? 'PC Agent',
+            platform: process.platform === 'win32' ? 'windows' : process.platform === 'darwin' ? 'macos' : process.platform === 'linux' ? 'linux' : 'other',
+            runtimeVersion: '1.0.0',
+            protocolVersion: PROTOCOL_VERSION,
+            capabilities: this.opts.capabilities ?? m?.capabilities ?? ['terminal', 'filesystem', 'browser'],
+            agentType: process.platform === 'win32' ? 'desktop-agent' : `${process.platform}-agent`,
+            userScope: process.env.ROSE_USER_SCOPE ?? '',
+            tools: m?.tools ?? [],
+            skills: m?.skills ?? [],
+            providers: m?.providers ?? [],
+            memoryCapabilities: m?.memoryCapabilities ?? [],
+            browser: m?.browser ?? false,
+            mcp: m?.mcp ?? false,
+            configVersion: m?.configVersion,
+            capabilityVersion: m?.capabilityVersion,
+        };
+    }
+
+    private async openSocket(serverUrl: string, id: DeviceIdentity, secretToken: string): Promise<void> {
+        const wsUrl = serverUrl.replace(/^http/, 'ws') + '/mesh/ws';
+        const ws = new WebSocket(wsUrl, { headers: { Authorization: `Bearer ${secretToken}` } });
         this.ws = ws;
 
         ws.on('open', () => {
-            ws.send(JSON.stringify({
-                type: 'hello', v: PROTOCOL_VERSION,
-                nonce: crypto.randomBytes(8).toString('hex'), ts: Date.now(),
-                deviceId: id.deviceId,
-                displayName: this.opts.displayName ?? 'PC Agent',
-                platform: process.platform === 'win32' ? 'windows' : process.platform === 'darwin' ? 'macos' : process.platform === 'linux' ? 'linux' : 'other',
-                runtimeVersion: '1.0.0',
-                protocolVersion: PROTOCOL_VERSION,
-                capabilities: this.opts.capabilities ?? ['terminal', 'filesystem', 'browser'],
-            }));
+            ws.send(JSON.stringify(this.buildHello(id)));
+            // Presence accuracy (§31): periodic ping keeps the live registry fresh.
+            if (this.pingTimer) clearInterval(this.pingTimer);
+            this.pingTimer = setInterval(() => {
+                try { ws.send(JSON.stringify({ type: 'ping', nonce: crypto.randomBytes(8).toString('hex'), ts: Date.now() })); } catch { /* close follows */ }
+            }, 30_000);
+            this.pingTimer.unref?.();
         });
 
         ws.on('message', (data) => {
@@ -145,22 +156,45 @@ export class PcMeshAgent {
             try { msg = JSON.parse(data.toString()); } catch { return; }
 
             switch (msg.type) {
-                case 'challenge': {
-                    const response = sha256Hex(`${msg.challenge}:${sha256Hex(id.deviceSecret!)}`);
-                    ws.send(JSON.stringify({
-                        type: 'challenge.response', v: PROTOCOL_VERSION,
-                        nonce: crypto.randomBytes(8).toString('hex'), ts: Date.now(),
-                        response,
-                        capabilities: this.opts.capabilities ?? ['terminal', 'filesystem', 'browser'],
-                    }));
-                    break;
-                }
                 case 'welcome':
-                    console.log(chalk.green(`✅ [MESH] Connected as ${msg.agentId} (trust: ${msg.trust}). Ready for delegations.`));
+                    id.agentId = msg.agentId;
+                    saveIdentity(id);
+                    console.log(chalk.green(`✅ [MESH] Connected as ${msg.agentId} (trust: ${msg.trust}, links: ${(msg.links ?? []).length}). Ready for delegations.`));
                     break;
+
                 case 'agent.task.delegate':
                     void this.runDelegated(msg.taskId, msg.goal, msg.ownerAgent ?? msg.from);
                     break;
+
+                case 'agent.link.request': {
+                    // §7: never auto-trust. Default restrictive; explicit opt-in for headless.
+                    const from = msg.from ?? msg.linkId;
+                    console.log(chalk.yellow(`🔗 [MESH] Link request ${msg.linkId} from ${msg.requester?.displayName ?? from} (${msg.requester?.platform ?? '?'})`));
+                    console.log(chalk.gray(`   caps: ${(msg.requester?.capabilities ?? []).join(', ') || '(none)'}`));
+                    console.log(chalk.gray(`   approve: web panel → Agent Mesh, or REST POST /api/links/${msg.linkId}/approve`));
+                    if (process.env.ROSE_MESH_AUTO_ACCEPT_LINKS === '1') {
+                        this.sendNow({ type: 'agent.link.accept', linkId: msg.linkId });
+                        console.log(chalk.green(`🔗 [MESH] Auto-accepted link ${msg.linkId} (ROSE_MESH_AUTO_ACCEPT_LINKS=1)`));
+                    }
+                    break;
+                }
+
+                case 'agent.link.accepted':
+                    console.log(chalk.green(`🔗 [MESH] Link ACCEPTED by peer (${msg.linkId}) — trusted relationship established.`));
+                    break;
+
+                case 'agent.link.rejected':
+                    console.log(chalk.red(`🔗✕ [MESH] Link rejected by peer (${msg.linkId}).`));
+                    break;
+
+                case 'agent.config.status':
+                    console.log(chalk.blue(`⚙️  [MESH] Peer config: proto=${msg.protocolVersion} capV=${msg.capabilityVersion} cfg=${msg.configVersion}`));
+                    break;
+
+                case 'capabilities.changed':
+                    void this.refreshCapabilities();
+                    break;
+
                 case 'agent.revoked':
                     console.log(chalk.red('🚫 This device was revoked by the server.'));
                     this.stop();
@@ -172,11 +206,21 @@ export class PcMeshAgent {
 
         ws.on('close', (code) => {
             if (this.stopped) return;
+            if (this.pingTimer) { clearInterval(this.pingTimer); this.pingTimer = null; }
             console.log(chalk.yellow(`[MESH] disconnected (${code}) — retrying…`));
-            setTimeout(() => void this.openSocket(serverUrl, loadIdentity() ?? id), Math.min(60_000, 3000 * (++this.attempts)));
+            setTimeout(() => void this.openSocket(serverUrl, loadIdentity() ?? id, secretToken), Math.min(60_000, 3000 * (++this.attempts)));
         });
 
         ws.on('error', () => { /* close follows */ });
+    }
+
+    private sendNow(payload: object): void {
+        this.ws?.send(JSON.stringify({
+            ...payload,
+            v: PROTOCOL_VERSION,
+            nonce: crypto.randomBytes(8).toString('hex'),
+            ts: Date.now(),
+        }));
     }
 
     /** Execute a delegated goal LOCALLY (real agent core) + report result. */

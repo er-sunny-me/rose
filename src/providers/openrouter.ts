@@ -1,16 +1,16 @@
-import { Config } from '../config.js';
+﻿import { Config } from '../config.js';
 import { Telemetry } from '../telemetry.js';
 import { CostEngine } from '../observability/cost.js';
 import type { ModelProvider } from '../router.js';
 
 /**
- * Phase 35 — OpenRouter provider.
+ * Phase 35 â€” OpenRouter provider.
  *
  * A first-class citizen of the existing provider architecture: same
  * ModelProvider contract as Gemini/Anthropic/OpenAI/Ollama, so health
  * circuit-breaker, fallback ordering, learned preferences, Security/Policy
  * gating of tool calls and observability all work unchanged. OpenRouter is a
- * REMOTE, external service — requests remain subject to Policy exactly like
+ * REMOTE, external service â€” requests remain subject to Policy exactly like
  * every other cloud provider; nothing here bypasses Security.
  */
 
@@ -38,7 +38,7 @@ export interface OpenRouterModelInfo {
     name?: string;
     contextLength?: number;
     supportsTools?: boolean;
-    /** Image INPUT support (vision). Never assumed — read from the API only. */
+    /** Image INPUT support (vision). Never assumed â€” read from the API only. */
     supportsVision?: boolean;
     modality?: string;
     /** USD per token as returned by OpenRouter pricing strings. Undefined when unknown. */
@@ -86,7 +86,7 @@ export class OpenRouterProvider {
     private baseUrl: string;
     private model: string;
 
-    /** Last normalized usage — surfaced by status/diagnostics and tests. */
+    /** Last normalized usage â€” surfaced by status/diagnostics and tests. */
     public lastUsage: OpenRouterUsage | null = null;
     /** Earliest time the next request is allowed after a Retry-After (rate limit). */
     public retryNotBefore = 0;
@@ -106,11 +106,11 @@ export class OpenRouterProvider {
         return Config.get().keys?.openrouter || process.env.OPENROUTER_API_KEY || undefined;
     }
 
-    // ─── Discovery (spec 5) ─────────────────────────────────
+    // â”€â”€â”€ Discovery (spec 5) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /**
      * List models from OpenRouter's public /models endpoint and map them into
-     * Rose capability metadata. Returns [] on failure — callers must still
+     * Rose capability metadata. Returns [] on failure â€” callers must still
      * work when the user names a valid model explicitly.
      */
     static async listModels(baseUrl?: string): Promise<OpenRouterModelInfo[]> {
@@ -182,14 +182,14 @@ export class OpenRouterProvider {
         OpenRouterProvider.cacheInfo(info, baseUrl);
     }
 
-    // ─── Request execution ──────────────────────────────────
+    // â”€â”€â”€ Request execution â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-    async execute(messages: any[], system?: string, maxTokens: number = 8192, options?: { responseFormatJson?: boolean }): Promise<any> {
+    async execute(messages: any[], system?: string, maxTokens: number = 8192, roseTools?: any[]): Promise<any> {
         if (this.health === 'OPEN') throw new RoseProviderError('PROVIDER_UNAVAILABLE', `Circuit Breaker OPEN for ${this.id}`);
 
         if (Date.now() < this.retryNotBefore) {
             const waitS = Math.ceil((this.retryNotBefore - Date.now()) / 1000);
-            throw new RoseProviderError('RATE_LIMITED', `OpenRouter rate limit active — retry in ${waitS}s.`);
+            throw new RoseProviderError('RATE_LIMITED', `OpenRouter rate limit active â€” retry in ${waitS}s.`);
         }
 
         const apiKey = OpenRouterProvider.apiKey();
@@ -208,7 +208,7 @@ export class OpenRouterProvider {
             // Ask OpenRouter to compute usage incl. cost when it can (spec 11).
             usage: { include: true },
         };
-        if (options?.responseFormatJson) body.response_format = { type: 'json_object' };
+        if ((roseTools as any)?.responseFormatJson) body.response_format = { type: 'json_object' };
 
         let res: Response;
         try {
@@ -248,7 +248,7 @@ export class OpenRouterProvider {
     }
 
     /**
-     * Streaming via SSE through the SAME provider contract — no second
+     * Streaming via SSE through the SAME provider contract â€” no second
      * streaming mechanism elsewhere. Deltas stream to `onDelta`; the resolved
      * value matches execute()'s shape so downstream parsers are unchanged.
      */
@@ -369,7 +369,7 @@ export class OpenRouterProvider {
                     current = [];
                 }
             } else if (line.startsWith(':')) {
-                // comment/keepalive — ignore
+                // comment/keepalive â€” ignore
             } else {
                 rest += line + '\n'; // incomplete multi-line frame boundary
             }
@@ -378,13 +378,13 @@ export class OpenRouterProvider {
         return { events, rest };
     }
 
-    // ─── Normalization: tools, usage, cost ──────────────────
+    // â”€â”€â”€ Normalization: tools, usage, cost â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /**
      * Normalize an OpenAI-compatible completion into the shared reply shape.
      * Native tool_calls are converted into the project's existing ```tool
-     * fenced-block protocol so the EXISTING parser → Security → ToolExecutor
-     * path handles them unchanged (spec 7 — never bypasses Policy).
+     * fenced-block protocol so the EXISTING parser â†’ Security â†’ ToolExecutor
+     * path handles them unchanged (spec 7 â€” never bypasses Policy).
      */
     private normalizeCompletion(data: any): any {
         const choice = data.choices?.[0] ?? {};
@@ -410,7 +410,7 @@ export class OpenRouterProvider {
             text = (text ? text + '\n\n' : '') + fenced.join('\n\n');
         }
 
-        // Usage & cost — recorded only with API-provided numbers (spec 11).
+        // Usage & cost â€” recorded only with API-provided numbers (spec 11).
         const u = data.usage ?? {};
         const details = u.prompt_tokens_details ?? {};
         const usage: OpenRouterUsage = {
@@ -427,7 +427,7 @@ export class OpenRouterProvider {
             promptTokens: usage.promptTokens,
             completionTokens: usage.completionTokens,
             cachedTokens: usage.cachedTokens,
-            // Costs are never invented — absent when API omits them.
+            // Costs are never invented â€” absent when API omits them.
             costUsd: usage.costUsd,
         });
         if (typeof usage.costUsd === 'number') {
@@ -443,7 +443,7 @@ export class OpenRouterProvider {
         };
     }
 
-    // ─── Error mapping (spec 12) ────────────────────────────
+    // â”€â”€â”€ Error mapping (spec 12) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     private async mapHttpError(res: Response): Promise<RoseProviderError> {
         let detail = '';
@@ -462,7 +462,7 @@ export class OpenRouterProvider {
             case 403:
                 this.bumpFailures();
                 return new RoseProviderError('AUTHENTICATION_FAILED',
-                    `OpenRouter authentication failed (${res.status}). Check your API key — currently ${maskOpenRouterKey(apiKey)}.`);
+                    `OpenRouter authentication failed (${res.status}). Check your API key â€” currently ${maskOpenRouterKey(apiKey)}.`);
             case 402:
                 this.bumpFailures();
                 return new RoseProviderError('INSUFFICIENT_CREDITS',
@@ -493,3 +493,4 @@ export class OpenRouterProvider {
         else this.health = 'DEGRADED';
     }
 }
+

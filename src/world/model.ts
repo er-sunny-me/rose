@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { roseDataPath } from '../storage-paths.js';
 
 export type EntityState = 'healthy' | 'degraded' | 'broken' | 'unknown';
 export type ObservationSource = 'OBSERVED' | 'REMEMBERED' | 'INFERRED' | 'PREDICTED';
@@ -25,7 +26,7 @@ export interface DependencyEdge {
 export class WorldModel {
     private static entities: Map<string, WorldEntity> = new Map();
     private static edges: DependencyEdge[] = [];
-    private static CACHE_FILE = path.join(process.cwd(), '.gemini', 'world_model.json');
+    private static CACHE_FILE = roseDataPath('world_model.json');
 
     public static init() {
         if (fs.existsSync(this.CACHE_FILE)) {

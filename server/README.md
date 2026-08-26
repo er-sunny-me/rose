@@ -47,12 +47,11 @@ ROSE_BIND=0.0.0.0 docker compose --profile tls up -d
 # On any machine:
 export ROSE_API_TOKEN=<token-from-server>
 rose config set web.host <server-ip>     # optional convenience
-rose agents pair                          # pairing codes flow through this server
-curl -H "Authorization: Bearer $TOKEN" http://<ip>:3000/api/v1/mesh
+ROSE_API_TOKEN=<mesh-api-password> rose agents connect https://mesh.example.com
+curl -H "Authorization: Bearer $TOKEN" http://<ip>:3000/api/mesh
 ```
 
-Mesh WebSocket: `wss://<host>/mesh/ws?token=…` (mobile app scans the QR from
-the PC — same host/token).
+Mesh WebSocket: `wss://<host>/mesh/ws` with `Authorization: Bearer <API password>`.
 
 ## Production checklist
 

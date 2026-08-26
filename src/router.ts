@@ -1,4 +1,4 @@
-﻿import { Telemetry } from './telemetry.js';
+import { Telemetry } from './telemetry.js';
 import { Secrets } from './security/secrets.js';
 import { sseLines, jsonLines, type StreamChunk } from './providers/stream.js';
 import chalk from 'chalk';
@@ -7,6 +7,8 @@ import { FailureInjector } from './reliability/injector.js';
 import { Config } from './config.js';
 
 export interface ModelRequirements {
+    /** Phase 36 fix: Rose tool declarations passed through to providers. */
+    tools?: any[];
     capabilities?: string[];
     maxTokens?: number;
     intent?: string;
@@ -24,7 +26,26 @@ export interface ModelProvider {
     health: 'HEALTHY' | 'DEGRADED' | 'OPEN';
     failures: number;
     
-    execute(messages: any[], system?: string, maxTokens?: number): Promise<any>;
+    execute(messages: any[], system?: string, maxTokens?: number, roseTools?: any[]): Promise<any>;
+}
+
+/** Convert Rose uppercase-type declarations to JSON-Schema (OpenAI/Anthropic). */
+function toJsSchema(params: any): any {
+    if (!params) return { type: 'object', properties: {} };
+    const walk = (node: any): any => {
+        if (Array.isArray(node)) return node.map(walk);
+        if (node && typeof node === 'object') {
+            const out: any = {};
+            for (const [k, v] of Object.entries(node)) {
+                out[k] = k === 'type' && typeof v === 'string' ? v.toLowerCase() : walk(v);
+            }
+            return out;
+        }
+        return node;
+    };
+    const copy = walk(params);
+    if (!copy.properties) copy.properties = {};
+    return copy;
 }
 
 // â”€â”€â”€ Google Gemini (Direct REST API) â”€â”€â”€
@@ -45,7 +66,7 @@ export class GeminiProvider implements ModelProvider {
         this.providerId = providerId || id;
     }
 
-    public async execute(messages: any[], system?: string, maxTokens: number = 8192): Promise<any> {
+    public async execute(messages: any[], system?: string, maxTokens: number = 8192, roseTools?: any[]): Promise<any> {
         if (this.health === 'OPEN') throw new Error(`Circuit Breaker OPEN for ${this.id}`);
         
         if (FailureInjector.isActive('provider_outage')) {
@@ -74,6 +95,10 @@ export class GeminiProvider implements ModelProvider {
                 body.systemInstruction = { parts: [{ text: system }] };
             }
 
+            if (roseTools && roseTools.length > 0) {
+                body.tools = [{ functionDeclarations: roseTools.map((t: any) => ({ name: t.name, description: t.description, parameters: toJsSchema(t.parameters) })) }];
+            }
+
             const modelName = this.providerId || 'gemini-2.0-flash';
             const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
 
@@ -89,13 +114,15 @@ export class GeminiProvider implements ModelProvider {
             }
 
             const data: any = await response.json();
-            const resultText = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+            const parts = data.candidates?.[0]?.content?.parts || [];
+            const resultText = parts.map((p: any) => p.text || '').join('');
             
             this.failures = 0;
             this.health = 'HEALTHY';
             
+            // Return raw parts so functionCall entries are visible to the tool loop
             return {
-                content: [{ text: resultText }],
+                content: parts,
                 choices: [{ message: { content: resultText } }]
             };
         } catch (e: any) {
@@ -158,7 +185,7 @@ export class AnthropicProvider implements ModelProvider {
         this.providerId = providerId || id;
     }
 
-    public async execute(messages: any[], system?: string, maxTokens: number = 8192): Promise<any> {
+    public async execute(messages: any[], system?: string, maxTokens: number = 8192, roseTools?: any[]): Promise<any> {
         if (this.health === 'OPEN') throw new Error(`Circuit Breaker OPEN for ${this.id}`);
 
         const apiKey = await Secrets.get('anthropic-api-key', Config.get().keys?.anthropic) ?? undefined;
@@ -173,6 +200,10 @@ export class AnthropicProvider implements ModelProvider {
                 messages: messages
             };
             if (system) body.system = system;
+
+            if (roseTools && roseTools.length > 0) {
+                body.tools = roseTools.map((t: any) => ({ name: t.name, description: t.description, input_schema: toJsSchema(t.parameters) }));
+            }
 
             const response = await fetch("https://api.anthropic.com/v1/messages", {
                 method: "POST",
@@ -255,7 +286,7 @@ export class OpenAIProvider implements ModelProvider {
         this.providerId = providerId || id;
     }
 
-    public async execute(messages: any[], system?: string, maxTokens: number = 8192): Promise<any> {
+    public async execute(messages: any[], system?: string, maxTokens: number = 8192, roseTools?: any[]): Promise<any> {
         if (this.health === 'OPEN') throw new Error(`Circuit Breaker OPEN for ${this.id}`);
 
         const apiKey = await Secrets.get('openai-api-key', Config.get().keys?.openai) ?? undefined;
@@ -266,17 +297,22 @@ export class OpenAIProvider implements ModelProvider {
         try {
             const msgs = system ? [{ role: 'system', content: system }, ...messages] : messages;
 
+            const body: any = {
+                model: this.providerId,
+                max_tokens: maxTokens,
+                messages: msgs
+            };
+            if (roseTools && roseTools.length > 0) {
+                body.tools = roseTools.map((t: any) => ({ type: 'function', function: { name: t.name, description: t.description, parameters: toJsSchema(t.parameters) } }));
+            }
+
             const response = await fetch("https://api.openai.com/v1/chat/completions", {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
                     "Authorization": `Bearer ${apiKey}`
                 },
-                body: JSON.stringify({
-                    model: this.providerId,
-                    max_tokens: maxTokens,
-                    messages: msgs
-                })
+                body: JSON.stringify(body)
             });
 
             if (!response.ok) {
@@ -285,15 +321,12 @@ export class OpenAIProvider implements ModelProvider {
             }
 
             const data: any = await response.json();
-            const resultText = data.choices?.[0]?.message?.content || '';
             
             this.failures = 0;
             this.health = 'HEALTHY';
             
-            return {
-                content: [{ text: resultText }],
-                choices: [{ message: { content: resultText } }]
-            };
+            // Return raw response so tool_calls are preserved for the tool loop
+            return data;
         } catch (e: any) {
             this.failures++;
             if (this.failures > 3) this.health = 'OPEN';
@@ -354,7 +387,7 @@ export class ProxyProvider implements ModelProvider {
         this.providerId = providerId || id;
     }
 
-    public async execute(messages: any[], system?: string, maxTokens: number = 8192): Promise<any> {
+    public async execute(messages: any[], system?: string, maxTokens: number = 8192, roseTools?: any[]): Promise<any> {
         if (this.health === 'OPEN') throw new Error(`Circuit Breaker OPEN for ${this.id}`);
         
         const proxyUrl = Config.get().proxy?.url || 'http://localhost:8642';
@@ -366,6 +399,10 @@ export class ProxyProvider implements ModelProvider {
                 messages: messages
             };
             if (system) body.system = system;
+
+            if (roseTools && roseTools.length > 0) {
+                body.tools = roseTools.map((t: any) => ({ type: 'function', function: { name: t.name, description: t.description, parameters: toJsSchema(t.parameters) } }));
+            }
 
             const response = await fetch(`${proxyUrl}/v1/messages`, {
                 method: "POST",
@@ -634,7 +671,7 @@ export class ModelRouter {
             });
 
             try {
-                const result = await candidate.execute(messages, system, requirements.maxTokens);
+                const result = await candidate.execute(messages, system, requirements.maxTokens, requirements.tools);
                 Telemetry.recordEvent('model.request_completed', 'model', 'completed', Date.now() - startTime);
                 return result;
             } catch (err: any) {

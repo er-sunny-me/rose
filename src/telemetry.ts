@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { SecurityEngine } from './security.js';
+import { roseDataPath } from './storage-paths.js';
 
 export interface TraceContext {
     traceId: string;
@@ -30,7 +31,7 @@ export class Telemetry {
     public static lastRunMetrics: Record<string, any> = {};
 
     public static initialize() {
-        const logDir = path.join(process.cwd(), 'logs');
+        const logDir = roseDataPath('logs');
         if (!fs.existsSync(logDir)) {
             fs.mkdirSync(logDir, { recursive: true });
         }

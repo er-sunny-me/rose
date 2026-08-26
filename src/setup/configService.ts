@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Phase 33 â€” Configuration service.
  *
  * The single source of truth for setup state. TUI, plain mode and the CLI all
@@ -43,6 +43,7 @@ export interface DraftConfig {
     memoryLearning: boolean;
     obsidianVaultPath: string;
     maxEntriesPerType: number;
+    fullAccess: boolean;
     appearance: AppearanceConfig;
 }
 
@@ -74,6 +75,7 @@ export function loadDraft(): DraftConfig {
         memoryLearning: cfg.memory?.learningEnabled !== false,
         obsidianVaultPath: cfg.memory?.obsidianVaultPath ?? '',
         maxEntriesPerType: cfg.memory?.maxEntriesPerType ?? 500,
+        fullAccess: cfg.security?.fullAccess !== false,
         appearance: {
             theme: cfg.appearance?.theme ?? 'roseDark',
             accent: cfg.appearance?.accent ?? 'rose',
@@ -305,6 +307,7 @@ export function diffAgainstCurrent(draft: DraftConfig): ConfigChange[] {
     push('OpenAI key', maskSecret(cur.keys.openai), maskSecret(draft.openaiKey));
     push('OpenRouter key', maskSecret(cur.keys.openrouter), maskSecret(draft.openrouterKey));
     push('Proxy URL', cur.proxy.url, draft.proxyUrl);
+    push('Full access', cur.security?.fullAccess !== false ? 'enabled' : 'disabled', draft.fullAccess ? 'enabled' : 'disabled');
     push('Autonomy', cur.security.autonomy ?? (cur.security.requireApprovals ? 'balanced' : 'balanced'), draft.autonomy);
     push('Web panel', cur.web?.enabled === true ? `on (${cur.web.host ?? '127.0.0.1'}:${cur.web.port ?? cur.server.port})` : 'off',
         draft.webEnabled ? `${draft.webHost}:${draft.webPort}` : 'off');
@@ -428,6 +431,7 @@ export function buildPersistedConfig(draft: DraftConfig): AppConfig {
     cfg.security.requireApprovals = draft.autonomy !== 'autonomous';
     cfg.security.allowFederation = draft.allowFederation;
     cfg.security.autonomy = draft.autonomy;
+    cfg.security.fullAccess = draft.fullAccess;
 
     cfg.server.port = draft.webPort;
     cfg.observability.logLevel = draft.logLevel;

@@ -2,9 +2,9 @@ import { WebSocket } from 'ws';
 import crypto from 'crypto';
 
 /**
- * Live connection registry — in-memory ONLY (Phase 37 §70).
+ * Live connection registry — in-memory ONLY (Phase 37 §70, extended Phase 38 §3).
  * Durable identity/trust lives in pairing.ts (devices.json); this map holds
- * just the live sockets + per-connection replay nonces.
+ * just the live sockets + per-connection replay nonces + the runtime manifest.
  */
 export interface AgentInfo {
     agentId: string;
@@ -20,7 +20,45 @@ export interface AgentInfo {
     ws: WebSocket;
     /** Replay protection: every inbound nonce is remembered per connection. */
     nonces: Set<string>;
+    /** Phase 38 — generic agent identity (never hardcode device kinds). */
+    agentType?: string;              // desktop-agent | android-agent | linux-agent | macos-agent | server-agent | docker-agent
+    connectionId?: string;           // per-socket id, stamped by the server
+    userScope?: string;              // account scope where applicable (§3)
+    /** Phase 38 — dynamic capability manifest details (§10). */
+    tools?: string[];
+    skills?: string[];
+    providers?: string[];
+    memoryCapabilities?: string[];   // e.g. ['vector','obsidian']
+    browser?: boolean;
+    mcp?: boolean;
 }
+
+export interface MeshMetrics {
+    startedAt: number;
+    wsConnections: number;
+    reconnects: number;
+    messagesIn: number;
+    delegations: number;
+    delegationRejects: number;
+    memoryShares: number;
+    linkRequests: number;
+    rejectedReplays: number;
+    errors: number;
+}
+
+/** Simple process-lifetime counters surfaced via /api/mesh → metrics (§53). */
+export const meshMetrics: MeshMetrics = {
+    startedAt: Date.now(),
+    wsConnections: 0,
+    reconnects: 0,
+    messagesIn: 0,
+    delegations: 0,
+    delegationRejects: 0,
+    memoryShares: 0,
+    linkRequests: 0,
+    rejectedReplays: 0,
+    errors: 0,
+};
 
 export class AgentRegistry {
     private agents = new Map<string, AgentInfo>();
@@ -29,7 +67,7 @@ export class AgentRegistry {
         // Supersede any older socket for the same agent.
         const prev = this.agents.get(agentId);
         if (prev && prev.ws.readyState === 1) {
-            try { prev.ws.close(4000, 'superseded'); } catch { /* ignore */ }
+            try { prev.ws.close(4000, 'superseded'); meshMetrics.reconnects++; } catch { /* ignore */ }
         }
         this.agents.set(agentId, { ...info, lastSeen: Date.now(), lastHeartbeat: Date.now() });
     }

@@ -102,7 +102,12 @@ describe('TransactionManager', () => {
 
     const ok = await TransactionManager.rollback(tx.id);
     expect(ok).toBe(true);
-    expect(fs.existsSync(target)).toBe(false);
+    let gone = !fs.existsSync(target);
+    for (let i = 0; i < 10 && !gone; i++) {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+      gone = !fs.existsSync(target);
+    }
+    expect(gone).toBe(true);
   });
 
   it('partial rollback failure marks the transaction FAILED', async () => {

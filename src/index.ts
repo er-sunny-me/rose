@@ -14,7 +14,7 @@ import { displayWelcome } from './cli/output.js';
 import { levenshteinDistance } from './cli/text-utils.js';
 import type { CliContext } from './cli/context.js';
 
-import { ToolExecutor } from './tools.js';
+import { ToolRegistry, ToolExecutor } from './tools.js';
 import { SkillRegistry } from './skills.js';
 import { MemoryService } from './memory.js';
 import { TaskRouter, TaskExecutor } from './tasks.js';
@@ -627,31 +627,82 @@ If no skills are needed, use an empty array. If no memory search is needed, use 
         console.log(chalk.gray('\n' + 'â”€'.repeat(60)) + '\n');
         return;
       }
+      // Phase 36 hotfix — AGENTIC TOOL LOOP for the text/SDK path.
+      // Previously tool declarations were only sent on the Live voice path;
+      // here the model never saw them and answered "I have no access".
       spinner.stop();
 
-      const anthropicMessages = this.chatHistory.map(msg => ({
+      const convoMessages = this.chatHistory.map(msg => ({
         role: msg.role === 'model' ? 'assistant' : 'user',
         content: msg.parts[0]?.text || ''
       }));
-      anthropicMessages.push({ role: 'user', content: contextInjectedMessage });
+      convoMessages.push({ role: 'user', content: contextInjectedMessage });
 
-      // Phase 36: token streaming — print deltas as they arrive.
+      const roseTools = ToolRegistry.getDeclarations();
+      const MAX_TOOL_ITERATIONS = 6;
       let replyText = '';
+
       try {
-          process.stdout.write(chalk.green('\n🤖 AI: '));
-          for await (const chunk of ModelRouter.routeStream(
-              { intent: 'generation', maxTokens: 8192 },
-              anthropicMessages,
+        for (let iteration = 0; iteration < MAX_TOOL_ITERATIONS; iteration++) {
+          const data: any = await ModelRouter.route(
+              { intent: 'generation', maxTokens: 8192, tools: roseTools },
+              convoMessages,
               getSystemInstruction()
-          )) {
-              if (chunk.type === 'text.delta' && chunk.content) {
-                  replyText += chunk.content;
-                  process.stdout.write(chalk.white(chunk.content));
-              } else if (chunk.type === 'error') {
-                  throw new Error(chunk.content || 'stream error');
+          );
+
+          // ---- extract function calls across provider shapes ----
+          const fnCalls: Array<{ id: string; name: string; args: any }> = [];
+          let textParts: string[] = [];
+
+          if (data?.content && Array.isArray(data.content)) {
+            for (const part of data.content) {
+              if (part?.type === 'tool_use' && part.name) {
+                fnCalls.push({ id: part.id || `call_${iteration}_${fnCalls.length}`, name: part.name, args: part.input ?? {} });
+              } else if (part?.functionCall?.name) {
+                fnCalls.push({ id: `call_${iteration}_${fnCalls.length}`, name: part.functionCall.name, args: part.functionCall.args ?? {} });
+              } else if ((part?.type === 'text' || !part?.type) && part?.text) {
+                textParts.push(part.text);
               }
+            }
           }
-          console.log();
+          const openaiCalls = data?.choices?.[0]?.message?.tool_calls;
+          if (Array.isArray(openaiCalls)) {
+            for (const tc of openaiCalls) {
+              if (tc?.function?.name) {
+                let parsedArgs: any = {};
+                try { parsedArgs = JSON.parse(tc.function.arguments || '{}'); } catch { /* keep {} */ }
+                fnCalls.push({ id: tc.id || `call_${iteration}_${fnCalls.length}`, name: tc.function.name, args: parsedArgs });
+              }
+            }
+          }
+
+          if (fnCalls.length === 0) {
+            replyText = textParts.join('\n') || data?.choices?.[0]?.message?.content || '';
+            break;
+          }
+
+          // ---- execute each requested tool through the Security pipeline ----
+          for (const call of fnCalls) {
+            console.log(chalk.magenta(`\n🔧 Tool: ${call.name}(${JSON.stringify(call.args).slice(0, 120)})`));
+            let resultText: string;
+            try {
+              const response = await ToolExecutor.execute(call);
+              resultText = typeof response === 'string'
+                  ? response
+                  : JSON.stringify(response?.response ?? response?.result ?? response);
+            } catch (e: any) {
+              resultText = `Tool error: ${e.message}`;
+            }
+            console.log(chalk.gray(`   ↳ ${(resultText || '').substring(0, 300).replace(/\n/g, ' ')}`));
+            convoMessages.push({ role: 'assistant', content: `[called tool ${call.name} with ${JSON.stringify(call.args)}]` });
+            convoMessages.push({ role: 'user', content: `[TOOL RESULT ${call.name}]:\n${String(resultText).slice(0, 8000)}` });
+          }
+          console.log(chalk.gray('   continuing with tool results...\n'));
+        }
+
+        if (!replyText) {
+          replyText = 'I used my available tools but need more steps to finish. Here is what I found so far.';
+        }
       } catch (err: any) {
           console.error(chalk.red('\n❌ Agent API Error: ' + err.message));
           if (!replyText) return;
@@ -664,6 +715,7 @@ If no skills are needed, use an empty array. If no memory search is needed, use 
 
       this.chatHistory.push({ role: 'user', parts: [{ text: message }] });
       this.chatHistory.push({ role: 'model', parts: [{ text: replyText }] });
+      console.log(chalk.green('\n🤖 AI: ') + chalk.white(replyText));
       console.log(chalk.gray('\n' + '─'.repeat(60)) + '\n');
     } catch (error: any) {
       console.error(chalk.red(`Error: ${error.message}\n`));

@@ -2,6 +2,7 @@
 import * as path from 'path';
 import crypto from 'crypto';
 import { Telemetry } from '../telemetry.js';
+import { roseDataPath } from '../storage-paths.js';
 
 export type AggregateType = 'session' | 'task' | 'transaction' | 'automation' | 'worker' | 'approval' | 'goal' | 'world' | 'incident' | 'maintenance' | 'federation' | 'extension' | 'mcp-server';
 
@@ -30,8 +31,8 @@ export interface RuntimeSnapshot {
 }
 
 export class EventStore {
-    private static BASE_DIR = path.join(process.cwd(), '.gemini', 'events');
-    private static LOG_FILE = path.join(process.cwd(), '.gemini', 'events', 'runtime.jsonl');
+    private static BASE_DIR = roseDataPath('events');
+    private static LOG_FILE = roseDataPath('events', 'runtime.jsonl');
     private static currentSequence = 0;
     private static sequenceMap: Map<string, number> = new Map();
 

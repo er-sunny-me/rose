@@ -20,6 +20,8 @@ export interface DelegationMessage {
     delegatedAgent?: string;
     requiredCapabilities?: string[];
     policy?: Record<string, unknown>;
+    /** Phase 38 §8: agent-initiated routing may only consider these linked peers. */
+    candidateFilter?: string[];
 }
 
 export interface RouteResult {
@@ -30,10 +32,15 @@ export interface RouteResult {
 
 export function routeDelegation(msg: DelegationMessage): RouteResult {
     const required = Array.isArray(msg.requiredCapabilities) ? msg.requiredCapabilities.map(String) : [];
+    const filter = Array.isArray(msg.candidateFilter) ? msg.candidateFilter.map(String) : null;
 
     let best: { agentId?: string; score: number } = { score: -1 };
     for (const c of globalRegistry.getAll()) {
         if (!c.agentId || c.agentId === msg.from) continue;
+
+        // Phase 38 §8: agent-initiated routing is restricted to linked peers
+        // when a filter is supplied (server-initiated passes no filter).
+        if (filter && !filter.includes(c.agentId)) continue;
 
         // Trust gate: only devices the registry still trusts may execute.
         const dev = DeviceRegistry.get(c.agentId);
