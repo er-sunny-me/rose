@@ -25,3 +25,10 @@ voice-fix.txt
 conversations/
 smoke-test/
 test-phase*.ts
+client_secret*.json
+.agents/
+.claude/
+.grok/
+.hermes/
+.kiro/
+skills/gog/gog.json

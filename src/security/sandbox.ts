@@ -482,7 +482,7 @@ export async function executeApproved(verdict: SandboxVerdict): Promise<SandboxR
 
     let file: string;
     let args: string[];
-    const needsShell = parsed.isBuiltin || parsed.operators.length > 0;
+    const needsShell = isWin || parsed.isBuiltin || parsed.operators.length > 0;
     if (needsShell) {
         file = isWin ? (process.env.COMSPEC || 'cmd.exe') : '/bin/sh';
         args = isWin ? ['/d', '/s', '/c', verdict.dryRunReport.command] : ['-c', verdict.dryRunReport.command];
@@ -503,7 +503,7 @@ export async function executeApproved(verdict: SandboxVerdict): Promise<SandboxR
         const child = spawn(file, args, {
             cwd: verdict.cwd,
             env: verdict.childEnv,
-            shell: needsShell,
+            shell: false, // Explicitly false to avoid DEP0190 in Node 24+ since we manually wrap with cmd.exe/sh
             windowsHide: true,
             detached: !isWin, // own process group on POSIX for tree-kill
         });

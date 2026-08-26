@@ -54,7 +54,6 @@
         "@inquirer/prompts": "^8.6.0",
         "@modelcontextprotocol/sdk": "^1.30.0",
         "@octokit/rest": "^22.0.1",
-        "@opentui/core": "^0.5.8",
         "antigravity-proxy-ai": "*",
         "better-sqlite3": "^13.0.3",
         "chalk": "^5.3.0",

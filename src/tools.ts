@@ -306,7 +306,7 @@ export class ToolExecutor {
           result = outcome.decision !== 'ALLOW'
             ? `Command blocked by sandbox (${outcome.decision}): ${outcome.reason}`
             : outcome.timedOut
-              ? `Command timed out after ${outcome.durationMs}ms and was terminated.\n${outcome.stdout}`
+              ? `Command timed out after ${outcome.durationMs}ms and was terminated.\n${outcome.stdout}\n\n[SYSTEM DIRECTIVE TO AI: This command hung (likely waiting for interactive user input like OAuth). DO NOT RETRY IT AS IS. If this is an OAuth setup, use \`start cmd /k your_command\` (without quotes around the command) instead, which will pop open a separate window for the user.]`
               : (outcome.stdout || outcome.stderr || 'Command executed successfully with no output.')
                 + (outcome.truncated ? '\n[output truncated by sandbox limit]' : '');
         }
@@ -598,11 +598,74 @@ export class ToolExecutor {
     }
 
     const duration = Date.now() - startTime;
+    let finalResult = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
+
+    // 1. Phase 40 Security First: Redact secrets BEFORE any compression or saving.
+    finalResult = typeof finalResult === 'string' ? SecurityEngine.redactSecrets(finalResult) : finalResult;
+
+    const { Config } = await import('./config.js');
+    const compConfig = Config.get().contextCompression || { enabled: true, threshold: 32000, preserveOriginal: true };
+
+    // Phase 40: Intelligent Context Compression for massive outputs
+    if (compConfig.enabled && finalResult.length > compConfig.threshold) {
+      let artifactPathStr = '';
+      if (compConfig.preserveOriginal) {
+          try {
+              const fs = await import('fs');
+              const path = await import('path');
+              const { roseDataPath } = await import('./storage-paths.js');
+              const artifactsDir = roseDataPath('artifacts');
+              if (!fs.existsSync(artifactsDir)) fs.mkdirSync(artifactsDir, { recursive: true });
+              const filename = `tool_output_${call.name}_${Date.now()}.txt`;
+              const fullPath = path.join(artifactsDir, filename);
+              fs.writeFileSync(fullPath, finalResult, 'utf-8');
+              artifactPathStr = `\n\nFull original output preserved at: artifact://${filename}`;
+          } catch (err: any) {
+              console.error('Failed to preserve original tool output artifact:', err.message);
+          }
+      }
+
+      try {
+        const { ModelRouter } = await import('./router.js');
+        const summaryMsg = `The following tool output is very large (${finalResult.length} chars). Summarize it to be as compact as possible while retaining absolute accuracy.
+CRITICAL REQUIREMENTS:
+- Preserve all errors, file paths, IDs, hashes, line numbers, and exact exit codes.
+- Do NOT drop important structural data.
+- Do NOT hallucinate.
+
+RAW OUTPUT:
+${finalResult.slice(0, 100000)}`;
+
+        // Note: We deliberately do NOT pass capabilities: ['fast'] here. 
+        // We want to use the currently active Model Provider, keeping sensitive data within authorized channels.
+        const summaryData = await ModelRouter.route(
+            { intent: 'compression', maxTokens: 4096 },
+            [{ role: 'user', content: summaryMsg }],
+            'You are an expert, precision data compressor for an autonomous AI agent.'
+        );
+
+        let summaryText = '';
+        if (summaryData?.content && Array.isArray(summaryData.content)) {
+            summaryText = summaryData.content.map((p: any) => p.text || '').join('');
+        } else if (typeof summaryData?.content === 'string') {
+            summaryText = summaryData.content;
+        } else if (summaryData?.choices?.[0]?.message?.content) {
+            summaryText = summaryData.choices[0].message.content;
+        }
+
+        if (summaryText.trim().length > 0) {
+            finalResult = `[COMPRESSED RESULT (Original length: ${finalResult.length})]\n${summaryText}${artifactPathStr}`;
+        } else {
+            finalResult = finalResult.substring(0, 8000) + '... (truncated)' + artifactPathStr;
+        }
+      } catch (e: any) {
+        // Fallback to truncation if compression fails
+        finalResult = finalResult.substring(0, 8000) + '... (truncated due to compression failure)' + artifactPathStr;
+      }
+    }
+
     Telemetry.recordEvent('tool.completed', 'tool', 'completed', duration, { name: call.name });
 
-    // Redact any secrets before returning to model
-    const redactedResult = typeof result === 'string' ? SecurityEngine.redactSecrets(result) : result;
-    
     if (txId) {
         TransactionManager.recordAction(txId, call.name, call.args?.command || call.args?.url || call.args?.query || call.name, sideEffect, cpId || undefined);
     }
@@ -610,7 +673,7 @@ export class ToolExecutor {
     return {
       id: call.id,
       name: call.name,
-      response: { result: redactedResult },
+      response: { result: finalResult },
     };
   }
 }

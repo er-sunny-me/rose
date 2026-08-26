@@ -325,12 +325,6 @@ async function startTuiChat() {
         if (!isQuiet) console.log(chalk.cyan('Launching voice mode...\n'));
         await startVoice();
     }
-    // `/opentui` hands over to the OpenTUI sandbox demo.
-    if ((chat as any).openTuiRequested) {
-        if (!isQuiet) console.log(chalk.cyan('Launching OpenTUI sandbox...\n'));
-        const { runOpenTuiDemo } = await import('./tui/opentui-demo.js');
-        await runOpenTuiDemo();
-    }
 }
 
 async function startVoice() {

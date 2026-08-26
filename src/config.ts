@@ -48,6 +48,7 @@ export interface AppConfig {
     };
     observability: {
         logLevel: 'debug' | 'info' | 'warn' | 'error';
+        verboseToolLogs?: boolean;
     };
     /** Phase 33 sections â€” all optional so pre-Phase-33 configs keep loading. */
     workspace?: {
@@ -79,6 +80,11 @@ export interface AppConfig {
         token?: string;
     };
     setup?: SetupState;
+    contextCompression?: {
+        enabled: boolean;
+        threshold: number;
+        preserveOriginal: boolean;
+    };
 }
 
 class ConfigurationEngine {
@@ -104,6 +110,11 @@ class ConfigurationEngine {
                 name: process.env.ROSE_AGENT_NAME || 'Rose',
                 model: process.env.ROSE_AGENT_MODEL || 'gemini-2.0-flash',
                 provider: 'proxy'
+            },
+            contextCompression: {
+                enabled: true,
+                threshold: 4000,
+                preserveOriginal: true
             },
             keys: {
                 gemini: process.env.GEMINI_API_KEY,

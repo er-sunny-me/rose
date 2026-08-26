@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "skills": {
+    "gog": {
+      "source": "clawhub.ai",
+      "sourceUrl": "https://clawhub.ai/steipete/skills/gog",
+      "sourceType": "well-known",
+      "computedHash": "d8d50454e71eac859d163b56ad594356efe0e1908200b21b57094d1b96a6ba1c",
+      "wellKnownDigest": "sha256:3b874fbb01b597a2e1313c457002d7a98fcc770e2cee13259446a58f1d49a75d"
+    }
+  }
+}

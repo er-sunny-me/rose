@@ -1,4 +1,4 @@
-﻿import { GoogleGenerativeAI } from '@google/generative-ai';
+import { GoogleGenerativeAI } from '@google/generative-ai';
 import * as readline from 'readline';
 import dotenv from 'dotenv';
 import chalk from 'chalk';
@@ -632,7 +632,7 @@ If no skills are needed, use an empty array. If no memory search is needed, use 
       // here the model never saw them and answered "I have no access".
       spinner.stop();
 
-      const convoMessages = this.chatHistory.map(msg => ({
+      const convoMessages: any[] = this.chatHistory.map(msg => ({
         role: msg.role === 'model' ? 'assistant' : 'user',
         content: msg.parts[0]?.text || ''
       }));
@@ -664,6 +664,8 @@ If no skills are needed, use an empty array. If no memory search is needed, use 
                 textParts.push(part.text);
               }
             }
+          } else if (typeof data?.content === 'string') {
+            textParts.push(data.content);
           }
           const openaiCalls = data?.choices?.[0]?.message?.tool_calls;
           if (Array.isArray(openaiCalls)) {
@@ -682,6 +684,7 @@ If no skills are needed, use an empty array. If no memory search is needed, use 
           }
 
           // ---- execute each requested tool through the Security pipeline ----
+          const toolResults: any[] = [];
           for (const call of fnCalls) {
             console.log(chalk.magenta(`\n🔧 Tool: ${call.name}(${JSON.stringify(call.args).slice(0, 120)})`));
             let resultText: string;
@@ -694,9 +697,11 @@ If no skills are needed, use an empty array. If no memory search is needed, use 
               resultText = `Tool error: ${e.message}`;
             }
             console.log(chalk.gray(`   ↳ ${(resultText || '').substring(0, 300).replace(/\n/g, ' ')}`));
-            convoMessages.push({ role: 'assistant', content: `[called tool ${call.name} with ${JSON.stringify(call.args)}]` });
-            convoMessages.push({ role: 'user', content: `[TOOL RESULT ${call.name}]:\n${String(resultText).slice(0, 8000)}` });
+            toolResults.push({ id: call.id, name: call.name, result: String(resultText).slice(0, 8000) });
           }
+          let fallbackText = toolResults.map(r => `[System Log: Tool '${r.name}' returned:\n${r.result}]`).join('\n\n');
+          convoMessages.push({ role: 'assistant', content: textParts.join('\n'), tool_calls: fnCalls });
+          convoMessages.push({ role: 'user', content: fallbackText, tool_results: toolResults });
           console.log(chalk.gray('   continuing with tool results...\n'));
         }
 

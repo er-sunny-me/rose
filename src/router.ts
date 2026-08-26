@@ -48,6 +48,49 @@ function toJsSchema(params: any): any {
     return copy;
 }
 
+/** Translate standard Rose messages into provider-specific shapes. */
+function translateMessages(messages: any[], format: 'gemini' | 'anthropic' | 'openai'): any[] {
+    const out: any[] = [];
+    for (const m of messages) {
+        if (format === 'anthropic') {
+            const content: any[] = [];
+            if (m.content) content.push({ type: 'text', text: m.content });
+            if (m.tool_calls) {
+                m.tool_calls.forEach((tc: any) => content.push({ type: 'tool_use', id: tc.id, name: tc.name, input: tc.args }));
+            }
+            if (m.tool_results) {
+                m.tool_results.forEach((tr: any) => content.push({ type: 'tool_result', tool_use_id: tr.id, content: tr.result }));
+            }
+            // Anthropic doesn't allow empty content array
+            if (content.length === 0) content.push({ type: 'text', text: '...' });
+            out.push({ role: m.role === 'assistant' ? 'assistant' : 'user', content });
+        } else if (format === 'gemini') {
+            const parts: any[] = [];
+            if (m.content) parts.push({ text: m.content });
+            if (m.tool_calls) {
+                m.tool_calls.forEach((tc: any) => parts.push({ functionCall: { name: tc.name, args: tc.args } }));
+            }
+            if (m.tool_results) {
+                m.tool_results.forEach((tr: any) => parts.push({ functionResponse: { name: tr.name, response: { result: tr.result } } }));
+            }
+            if (parts.length === 0) parts.push({ text: '...' });
+            out.push({ role: m.role === 'assistant' ? 'model' : 'user', parts });
+        } else if (format === 'openai') {
+            if (m.tool_results) {
+                if (m.content) out.push({ role: m.role, content: m.content });
+                m.tool_results.forEach((tr: any) => out.push({ role: 'tool', tool_call_id: tr.id, name: tr.name, content: tr.result }));
+            } else {
+                const msg: any = { role: m.role, content: m.content || null };
+                if (m.tool_calls) {
+                    msg.tool_calls = m.tool_calls.map((tc: any) => ({ id: tc.id, type: 'function', function: { name: tc.name, arguments: JSON.stringify(tc.args) } }));
+                }
+                out.push(msg);
+            }
+        }
+    }
+    return out;
+}
+
 // â”€â”€â”€ Google Gemini (Direct REST API) â”€â”€â”€
 export class GeminiProvider implements ModelProvider {
     public id: string;
@@ -81,10 +124,7 @@ export class GeminiProvider implements ModelProvider {
         }
 
         try {
-            const contents = messages.map(m => ({
-                role: m.role === 'assistant' ? 'model' : m.role,
-                parts: [{ text: m.content }]
-            }));
+            const contents = translateMessages(messages, 'gemini');
 
             const body: any = {
                 contents,
@@ -138,10 +178,7 @@ export class GeminiProvider implements ModelProvider {
         const apiKey = await Secrets.get('gemini-api-key', Config.get().keys?.gemini) ?? undefined;
         if (!apiKey) throw new Error('Missing Gemini API Key for streaming.');
 
-        const contents = messages.map(m => ({
-            role: m.role === 'assistant' ? 'model' : m.role,
-            parts: [{ text: m.content }]
-        }));
+        const contents = translateMessages(messages, 'gemini');
         const body: any = { contents, generationConfig: { maxOutputTokens: maxTokens } };
         if (system) body.systemInstruction = { parts: [{ text: system }] };
 
@@ -197,7 +234,7 @@ export class AnthropicProvider implements ModelProvider {
             const body: any = {
                 model: this.providerId,
                 max_tokens: maxTokens,
-                messages: messages
+                messages: translateMessages(messages, 'anthropic')
             };
             if (system) body.system = system;
 
@@ -240,7 +277,7 @@ export class AnthropicProvider implements ModelProvider {
         const body: any = {
             model: this.providerId,
             max_tokens: maxTokens,
-            messages,
+            messages: translateMessages(messages, 'anthropic'),
             stream: true,
         };
         if (system) body.system = system;
@@ -300,7 +337,7 @@ export class OpenAIProvider implements ModelProvider {
             const body: any = {
                 model: this.providerId,
                 max_tokens: maxTokens,
-                messages: msgs
+                messages: translateMessages(messages, 'openai')
             };
             if (roseTools && roseTools.length > 0) {
                 body.tools = roseTools.map((t: any) => ({ type: 'function', function: { name: t.name, description: t.description, parameters: toJsSchema(t.parameters) } }));
@@ -349,7 +386,7 @@ export class OpenAIProvider implements ModelProvider {
             },
             body: JSON.stringify({
                 model: this.providerId,
-                messages: chatMessages,
+                messages: translateMessages(chatMessages, 'openai'),
                 max_tokens: maxTokens,
                 stream: true,
             }),
@@ -396,7 +433,7 @@ export class ProxyProvider implements ModelProvider {
             const body: any = {
                 model: this.providerId,
                 max_tokens: maxTokens,
-                messages: messages
+                messages: translateMessages(messages, 'anthropic')
             };
             if (system) body.system = system;
 

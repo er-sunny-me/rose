@@ -108,6 +108,9 @@ Goal: "${goal}"
 Context:
 ${context}
 
+CRITICAL RULES:
+1. ALWAYS use forward slashes (/) for file paths instead of backslashes (\\), even on Windows, to avoid JSON parsing errors.
+
 Do not output more than 10 steps.`;
 
         try {
